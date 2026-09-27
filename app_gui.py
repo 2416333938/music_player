@@ -1284,6 +1284,12 @@ class PlayerApp:
                         command=self._scan_local, bg=T.ELEVATED,
                         fg=T.TEXT_2, panel_bg=T.BG,
                         min_width=104).pack(side=tk.RIGHT, padx=(0, 8))
+        W.PrimaryButton(bar, "修复文件", icon="warning",
+                        command=self._repair_local, bg=T.ELEVATED,
+                        fg=T.AMBER, panel_bg=T.BG,
+                        min_width=104,
+                        tooltip="扫描并修复早期版本写坏标签的音频").pack(
+            side=tk.RIGHT, padx=(0, 8))
 
         list_wrap = tk.Frame(view, bg=T.PANEL, highlightthickness=1,
                              highlightbackground=T.BORDER)
@@ -2096,6 +2102,55 @@ class PlayerApp:
     # ==================================================
     # 本地音乐
     # ==================================================
+    def _repair_local(self):
+        """扫描并修复被早期版本写坏标签的音频文件"""
+        directory = self.downloads.directory
+        if not directory or not os.path.isdir(directory):
+            W.Toast.show(self.root, "下载目录不存在", "warn")
+            return
+        if not W.ConfirmDialog(
+                self.root, "修复音频文件",
+                f"将扫描 {directory}，把早期版本误写 ID3 标签而损坏的文件"
+                f"（B站 fMP4 音频）恢复成正确的 .m4a。\n\n"
+                f"原文件会改名成 .broken 保留，确认没问题后可以自己删。",
+                ok_text="开始修复").show():
+            return
+
+        W.Toast.show(self.root, "正在扫描并修复…", "info", 2600)
+        self.view_subtitle.configure(text="正在扫描文件…")
+
+        def worker():
+            try:
+                import repair
+                result = repair.scan_and_repair(directory)
+                self._ui(lambda: self._after_repair(result))
+            except Exception as exc:
+                import traceback
+                traceback.print_exc()
+                self._ui(lambda: W.Toast.show(
+                    self.root, f"修复出错：{exc}", "error", 4200))
+        threading.Thread(target=worker, daemon=True,
+                         name="repair-scan").start()
+
+    def _after_repair(self, result):
+        fixed = result.get("fixed") or []
+        failed = result.get("failed") or []
+        scanned = result.get("scanned") or 0
+        self._scan_local()
+        if fixed:
+            message = f"已修复 {len(fixed)} 个文件"
+            if failed:
+                message += f"，{len(failed)} 个失败"
+            W.Toast.show(self.root, message, "ok", 4600)
+        elif failed:
+            W.Toast.show(self.root,
+                         f"有 {len(failed)} 个文件修复失败（可能被占用或权限不足）",
+                         "warn", 4600)
+        else:
+            W.Toast.show(self.root,
+                         f"扫描了 {scanned} 个文件，都很正常，不需要修复",
+                         "ok", 3600)
+
     def _local_tracks(self):
         """从下载目录里扫出来的本地文件"""
         return list(getattr(self, "_local_tracks_cache", []))

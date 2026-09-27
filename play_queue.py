@@ -371,6 +371,14 @@ class PlayQueue:
         if getattr(self, "_token", token) != token:
             return
 
+        # 本地文件顺手修复（老版本可能把 fMP4 当 mp3 写过 ID3 头）
+        if not is_url and source:
+            try:
+                import repair
+                source = repair.repair_before_play(source)
+            except Exception as exc:
+                print(f"[播放] 本地文件检查失败（忽略）: {exc}")
+
         # ---- 2. 取在线地址 ----
         if not source:
             platform = track.get("platform")

@@ -149,7 +149,7 @@ class PrimaryButton(tk.Canvas):
     def __init__(self, master, text, icon=None, command=None,
                  bg=None, fg=None, hover_bg=None, panel_bg=None,
                  height=34, font=None, min_width=92, pad_x=16, radius=None,
-                 outline=None):
+                 outline=None, tooltip=None):
         self._panel = panel_bg or T.PANEL
         super().__init__(master, height=height, bg=self._panel,
                          highlightthickness=0, bd=0, takefocus=0)
@@ -175,6 +175,8 @@ class PrimaryButton(tk.Canvas):
         self.bind("<ButtonRelease-1>", self._on_release)
         self.bind("<Configure>", lambda e: self._redraw())
         self._lock_natural()
+        if tooltip:
+            Tooltip(self, tooltip)
 
     def _calc_natural_width(self):
         """按文字实际像素宽度算出按钮应该多宽"""

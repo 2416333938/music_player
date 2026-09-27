@@ -77,16 +77,134 @@ def unique_path(directory: str, filename: str) -> str:
     return candidate
 
 
+AUDIO_CONTAINERS = {
+    ".mp3": "mp3",
+    ".m4a": "mp4",
+    ".mp4": "mp4",
+    ".flac": "flac",
+    ".ogg": "ogg",
+    ".oga": "ogg",
+    ".opus": "opus",
+    ".wav": "wav",
+    ".aac": "adts",
+}
+
+# MP4 家族的 box 类型，用来在 ftyp 出现位置不典型时兜底判断
+_MP4_BOXES = (b"moov", b"mdat", b"free", b"wide", b"skip", b"ftyp", b"styp",
+              b"sidx", b"moof")
+
+
+def _id3_size(head: bytes) -> int:
+    """ID3v2 标签总长度（含 10 字节头）；不是 ID3 返回 0"""
+    if len(head) < 10 or head[:3] != b"ID3":
+        return 0
+    size = ((head[6] & 0x7F) << 21) | ((head[7] & 0x7F) << 14) | \
+           ((head[8] & 0x7F) << 7) | (head[9] & 0x7F)
+    return 10 + size
+
+
+def sniff_container(path: str) -> str:
+    """按文件头判断真实容器格式，而不是看扩展名
+
+    这个很重要：B站音频是 fMP4/AAC，如果按 .mp3 去写 ID3v2 标签，
+    文件会被写坏（ID3 头 + MP4 数据），pygame 和 ffmpeg 都读不了。
+    """
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(16)
+            if not head:
+                return ""
+            offset = _id3_size(head)
+            if offset:
+                if offset > len(head) - 8:
+                    fh.seek(offset)
+                    head = head[:10] + fh.read(16)
+                # 跳过 ID3 头看真实载荷
+                payload = head[10 + (offset - 10):] if offset <= len(head) \
+                    else b""
+                if len(payload) >= 8:
+                    head = payload
+                else:
+                    fh.seek(offset)
+                    head = fh.read(16)
+    except Exception:
+        return ""
+
+    if len(head) >= 12 and head[4:8] == b"ftyp":
+        return "mp4"
+    if len(head) >= 8 and head[4:8] in _MP4_BOXES:
+        return "mp4"
+    if head[:4] == b"fLaC":
+        return "flac"
+    if head[:4] == b"OggS":
+        if b"OpusHead" in head:
+            return "opus"
+        return "ogg"
+    if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
+        return "wav"
+    if head[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xfa", b"\xff\xf2",
+                    b"\xff\xe3", b"\xff\xf9"):
+        return "mp3"
+    if len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xF0) == 0xF0:
+        return "adts"
+    return ""
+
+
+def ext_for_container(container: str) -> str:
+    return {"mp3": ".mp3", "mp4": ".m4a", "flac": ".flac", "ogg": ".ogg",
+            "opus": ".opus", "wav": ".wav", "adts": ".aac"}.get(container, "")
+
+
+def _container_of_ext(ext: str) -> str:
+    return AUDIO_CONTAINERS.get((ext or "").lower(), "")
+
+
+def ensure_correct_extension(path: str):
+    """核对扩展名和真实格式，不一致就改名
+
+    返回最终的文件路径（可能和传进来的不同）。
+    """
+    container = sniff_container(path)
+    if not container:
+        return path
+    current_ext = os.path.splitext(path)[1].lower()
+    if _container_of_ext(current_ext) == container:
+        return path
+    wanted = ext_for_container(container)
+    if not wanted:
+        return path
+    target = os.path.splitext(path)[0] + wanted
+    if os.path.normcase(target) == os.path.normcase(path):
+        return path
+    try:
+        if os.path.exists(target):                 # 不覆盖已有文件
+            target = unique_path(os.path.dirname(target),
+                                 os.path.basename(target))
+        os.replace(path, target)
+        print(f"[下载] 扩展名与真实格式不符（{container}），已改名："
+              f"{os.path.basename(target)}")
+        return target
+    except Exception as exc:
+        print(f"[下载] 改名失败: {exc}")
+        return path
+
+
 def write_tags(path: str, track: dict):
-    """尽力写入元数据；任何失败都忽略（不影响音频本身）"""
+    """尽力写入元数据；任何失败都忽略（不影响音频本身）
+
+    关键点：按文件**真实格式**挑标签写法，不看扩展名。
+    MP4/M4A 只能写 iTunSMPB 那套 atom，绝对不能加 ID3v2 头，否则文件报废。
+    """
     if not HAS_MUTAGEN:
         return
     title = tray.track_title(track)
     artist = tray.track_artist(track)
     album = track.get("album") or ""
-    ext = os.path.splitext(path)[1].lower()
+
+    container = sniff_container(path) or _container_of_ext(
+        os.path.splitext(path)[1])
     try:
-        if ext == ".mp3":
+        if container == "mp3":
             try:
                 tags = ID3(path)
             except ID3NoHeaderError:
@@ -100,15 +218,7 @@ def write_tags(path: str, track: dict):
                 tags.delall("TALB")
                 tags.add(TALB(encoding=3, text=album))
             tags.save(path, v2_version=3)
-        elif ext == ".flac":
-            audio = FLAC(path)
-            audio["title"] = title
-            if artist:
-                audio["artist"] = artist
-            if album:
-                audio["album"] = album
-            audio.save()
-        elif ext in (".m4a", ".mp4"):
+        elif container == "mp4":
             audio = MP4(path)
             audio["\xa9nam"] = title
             if artist:
@@ -116,6 +226,17 @@ def write_tags(path: str, track: dict):
             if album:
                 audio["\xa9alb"] = album
             audio.save()
+        elif container == "flac":
+            audio = FLAC(path)
+            audio["title"] = title
+            if artist:
+                audio["artist"] = artist
+            if album:
+                audio["album"] = album
+            audio.save()
+        else:
+            # ogg / opus / wav / adts：不写标签，避免踩各家实现的坑
+            return
     except Exception as exc:
         print(f"[下载] 写入标签失败（忽略）: {exc}")
 
@@ -349,6 +470,9 @@ class DownloadManager:
                     self._changed()
 
             os.replace(tmp_path, target)
+            # 先核对真实格式，扩展名不对就改名；
+            # 避免把 fMP4 当成 mp3 去写 ID3 标签导致文件报废
+            target = ensure_correct_extension(target)
             task.path = target
             write_tags(target, task.track)
 

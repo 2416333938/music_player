@@ -431,7 +431,83 @@ def _run_checks():
           "播放量格式化 12345 → 1.2万")
     check(CARD_MODULE.make_badge_count(999) == "999", "播放量格式化 999")
 
-    print("\n=== 8. 界面构建 ===")
+    print("\n=== 8. 音频格式识别与文件修复 ===")
+    import downloader as DL
+    import player as PL
+    import repair as RP
+    import shutil as _sh
+    import tempfile
+
+    work = tempfile.mkdtemp(prefix="audio_selftest_")
+    try:
+        # --- 构造各种格式的样本，检查嗅探是否正确 ---
+        mp3_head = b"\xff\xfb\x90\x00" + b"\x00" * 400
+        mp4_head = (b"\x00\x00\x00\x20ftypisom" + b"\x00" * 32 +
+                    b"\x00\x00\x00\x08moov" + b"\x00" * 400)
+        flac_head = b"fLaC" + b"\x00" * 400
+        ogg_head = b"OggS" + b"\x00" * 4 + b"OpusHead" + b"\x00" * 400
+
+        samples = {"s.mp3": (mp3_head, "mp3"),
+                   "s.m4a": (mp4_head, "mp4"),
+                   "s.flac": (flac_head, "flac"),
+                   "s.opus": (ogg_head, "opus")}
+        for name, (data, want) in samples.items():
+            path = os.path.join(work, name)
+            with open(path, "wb") as fh:
+                fh.write(data)
+            got = DL.sniff_container(path)
+            check(got == want, f"格式嗅探 {name} → {got}（期望 {want}）")
+
+        # --- 扩展名和真实格式不符时自动改名 ---
+        wrong = os.path.join(work, "wrong.mp3")
+        with open(wrong, "wb") as fh:
+            fh.write(mp4_head)
+        fixed_path = DL.ensure_correct_extension(wrong)
+        check(fixed_path.endswith(".m4a"),
+              f"mp4 内容用 .mp3 后缀会被改名（{os.path.basename(fixed_path)}）")
+        check(not os.path.exists(wrong), "改名后旧路径不存在")
+
+        # --- 复现「ID3 头 + MP4 数据」的损坏场景 ---
+        id3 = b"ID3\x03\x00\x00\x00\x00\x00\x2a" + b"\x00" * 42   # 52 字节
+        broken = os.path.join(work, "broken.mp3")
+        with open(broken, "wb") as fh:
+            fh.write(id3 + mp4_head)
+        check(RP.needs_repair(broken), "能识别出被写坏的文件")
+        check(not RP.needs_repair(os.path.join(work, "s.m4a")),
+              "正常 m4a 不会被误判")
+        check(not RP.needs_repair(os.path.join(work, "s.mp3")),
+              "正常 mp3 不会被误判")
+
+        ok, info = RP.strip_id3_copy(broken)
+        check(ok, f"修复成功（{info if not ok else 'ok'}）")
+        if ok:
+            check(os.path.getsize(info) == len(mp4_head),
+                  f"修复后大小精确等于原始音频（{os.path.getsize(info)} "
+                  f"vs {len(mp4_head)}）")
+            check(DL.sniff_container(info) == "mp4", "修复后格式正确")
+            check(os.path.exists(broken + ".broken"), "原文件保留为 .broken")
+            check(not RP.needs_repair(info), "修复后不再需要修复")
+
+        # --- 正常的 mp3 走 convert_to_mp3 不该崩（缺 ffmpeg 就返回 None）---
+        result = PL.convert_to_mp3(os.path.join(work, "s.mp3"))
+        check(result is None or isinstance(result, str),
+              "convert_to_mp3 对无效音频优雅返回")
+
+        # --- 扫描修复 ---
+        scan_dir = os.path.join(work, "scan")
+        os.makedirs(scan_dir)
+        with open(os.path.join(scan_dir, "a.mp3"), "wb") as fh:
+            fh.write(id3 + mp4_head)
+        with open(os.path.join(scan_dir, "b.mp3"), "wb") as fh:
+            fh.write(mp3_head)
+        scan = RP.scan_and_repair(scan_dir)
+        check(scan["scanned"] == 2, f"扫描到 2 个文件（{scan['scanned']}）")
+        check(len(scan["fixed"]) == 1, "修复了 1 个坏文件")
+        check(len(scan["failed"]) == 0, "没有修复失败")
+    finally:
+        _sh.rmtree(work, ignore_errors=True)
+
+    print("\n=== 9. 界面构建 ===")
     app = None
     try:
         app = app_gui.PlayerApp(root)

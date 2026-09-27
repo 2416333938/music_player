@@ -170,6 +170,57 @@ def find_cached(url: str):
     return None
 
 
+def _container_from_magic(path: str) -> str:
+    """按文件头判断真实容器（和 downloader.sniff_container 同一套规则）"""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(16)
+            if head[:3] == b"ID3":
+                size = ((head[6] & 0x7F) << 21) | ((head[7] & 0x7F) << 14) | \
+                       ((head[8] & 0x7F) << 7) | (head[9] & 0x7F)
+                fh.seek(10 + size)
+                head = fh.read(16)
+    except Exception:
+        return ""
+    if len(head) >= 12 and head[4:8] == b"ftyp":
+        return "mp4"
+    if head[:4] == b"fLaC":
+        return "flac"
+    if head[:4] == b"OggS":
+        return "opus" if b"OpusHead" in head else "ogg"
+    if head[:4] == b"RIFF":
+        return "wav"
+    if head[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xfa", b"\xff\xf2"):
+        return "mp3"
+    return ""
+
+
+_CACHE_EXT = {"mp3": ".mp3", "mp4": ".m4a", "flac": ".flac", "ogg": ".ogg",
+              "opus": ".opus", "wav": ".wav"}
+
+
+def fix_cached_extension(path: str) -> str:
+    """缓存文件扩展名和真实格式不符时改名，返回最终路径
+
+    B站返回的是 fMP4/AAC，但 URL 里没有扩展名，早先会存成 .mp3，
+    这样 pygame 会按 mp3 去解析而失败。
+    """
+    container = _container_from_magic(path)
+    wanted = _CACHE_EXT.get(container)
+    if not wanted:
+        return path
+    if os.path.splitext(path)[1].lower() == wanted:
+        return path
+    target = os.path.splitext(path)[0] + wanted
+    try:
+        if os.path.exists(target):
+            return path
+        os.replace(path, target)
+        return target
+    except Exception:
+        return path
+
+
 def prune_cache():
     """按体积 / 数量清理缓存目录"""
     try:
@@ -207,25 +258,51 @@ def convert_to_mp3(src: str, workdir: str = None):
     """用 ffmpeg 转 mp3，失败返回 None
 
     ffmpeg 优先用项目根目录里的那一份（见 find_ffmpeg）。
+    输出文件放在缓存目录并用哈希命名：源文件名可能很长（B站标题+emoji），
+    再拼上 .conv.mp3 容易撞 Windows 路径长度限制，也容易踩编码问题。
     """
     ffmpeg = find_ffmpeg()
     if not ffmpeg:
         return None
-    workdir = workdir or os.path.dirname(src) or tempfile.gettempdir()
-    base = os.path.splitext(os.path.basename(src))[0]
-    dst = os.path.join(workdir, base + ".conv.mp3")
+    if not os.path.exists(src):
+        print(f"[播放器] 转码源文件不存在: {src}")
+        return None
+
+    workdir = workdir or CACHE_DIR
     try:
-        subprocess.run(
+        os.makedirs(workdir, exist_ok=True)
+    except Exception:
+        workdir = tempfile.gettempdir()
+
+    key = hashlib.sha1(os.path.abspath(src).encode("utf-8")).hexdigest()[:16]
+    dst = os.path.join(workdir, f"conv-{key}.mp3")
+    try:
+        result = subprocess.run(
             [ffmpeg, "-y", "-loglevel", "error", "-i", src, "-vn",
              "-acodec", "libmp3lame", "-q:a", "2", dst],
-            check=True, timeout=300,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=300,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             creationflags=CREATE_NO_WINDOW,
         )
-        return dst if os.path.exists(dst) and os.path.getsize(dst) > 1024 else None
     except Exception as exc:
-        print(f"[播放器] ffmpeg 转码失败: {exc}")
+        print(f"[播放器] ffmpeg 调用失败: {exc}")
         return None
+
+    if result.returncode != 0:
+        detail = (result.stderr or b"").decode("utf-8", "replace").strip()
+        detail = detail.splitlines()[-1] if detail else ""
+        print(f"[播放器] ffmpeg 转码失败（exit {result.returncode}）"
+              + (f": {detail}" if detail else ""))
+        try:
+            if os.path.exists(dst):
+                os.unlink(dst)
+        except Exception:
+            pass
+        return None
+
+    if os.path.exists(dst) and os.path.getsize(dst) > 1024:
+        return dst
+    return None
 
 
 # ============================================================
@@ -578,30 +655,41 @@ class MusicPlayer:
         # ---- 2. 加载（失败则尝试 ffmpeg 转码）----
         try:
             pygame.mixer.music.load(path)
-        except Exception:
-            converted = convert_to_mp3(
-                path,
-                workdir=CACHE_DIR if is_url else os.path.dirname(path) or None)
-            if not converted:
-                if not find_ffmpeg():
-                    self._fail(generation, "无法播放该格式：缺 ffmpeg。"
-                                           "把 ffmpeg.exe 放到程序根目录即可")
-                else:
-                    self._fail(generation, "无法播放该格式，ffmpeg 转码也失败了")
-                return
-            if not is_url:
-                self._local_files.append(converted)
-            try:
-                pygame.mixer.music.load(converted)
-                path = converted
-            except Exception as exc:
-                if converted not in self._local_files:
-                    try:
-                        os.unlink(converted)
-                    except Exception:
-                        pass
-                self._fail(generation, f"加载失败: {exc}")
-                return
+        except Exception as first_error:
+            # 先把真实格式和扩展名对齐：B站音频其实是 fMP4/AAC，
+            # 用 .mp3 后缀会让 pygame 按 mp3 解析而失败
+            fixed = fix_cached_extension(path) if is_url else path
+            if fixed != path:
+                path = fixed
+                try:
+                    pygame.mixer.music.load(path)
+                    first_error = None
+                except Exception as exc:
+                    first_error = exc
+            if first_error is not None:
+                converted = convert_to_mp3(path, workdir=CACHE_DIR)
+                if not converted:
+                    if not find_ffmpeg():
+                        self._fail(generation, "无法播放该格式：缺 ffmpeg。"
+                                               "把 ffmpeg.exe 放到程序根目录即可")
+                    else:
+                        self._fail(generation,
+                                   f"无法播放该格式（{first_error}），"
+                                   f"ffmpeg 转码也失败了")
+                    return
+                if not is_url:
+                    self._local_files.append(converted)
+                try:
+                    pygame.mixer.music.load(converted)
+                    path = converted
+                except Exception as exc:
+                    if converted not in self._local_files:
+                        try:
+                            os.unlink(converted)
+                        except Exception:
+                            pass
+                    self._fail(generation, f"加载失败: {exc}")
+                    return
 
         # ---- 3. 播放 ----
         try:
