@@ -22,6 +22,19 @@ shots/
 _seed_shot.py
 _probe*.py
 
+# ---------------- 本地 ffmpeg（体积大，不入库）----------------
+# 根目录下的 ffmpeg 二进制、或解压出来的 ffmpeg 发行包 / 源码包，全部忽略
+ffmpeg.exe
+ffprobe.exe
+ffplay.exe
+ffmpeg/
+ffmpeg-*/
+ffprobe-*/
+ffmpeg*.zip
+ffmpeg*.7z
+ffmpeg*.tar.xz
+ffmpeg*.tar.gz
+
 # ---------------- 虚拟环境 ----------------
 .venv/
 venv/

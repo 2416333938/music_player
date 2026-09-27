@@ -8,6 +8,9 @@
 - pygame 解不了的格式自动用 ffmpeg 转码兜底
 
 对外接口尽量保持向后兼容：play_url(url, on_state_change=...) 仍可用。
+
+ffmpeg 查找顺序：项目根目录（含常见子目录） → 系统 PATH。
+把 ffmpeg.exe 丢在项目根目录就会被自动用上，不必配环境变量。
 """
 from __future__ import annotations
 
@@ -15,12 +18,21 @@ import hashlib
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 
 import pygame
 import requests
+
+
+def _app_dir() -> str:
+    """源码运行取脚本目录；PyInstaller 打包后取 exe 所在目录"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
 
 CACHE_DIR = os.path.join(
     os.environ.get("TEMP") or tempfile.gettempdir(), "music_player_cache")
@@ -33,6 +45,82 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
       "Chrome/120.0.0.0 Safari/537.36")
 
 AUDIO_EXTS = (".mp3", ".flac", ".m4a", ".wav", ".ogg", ".aac", ".opus")
+
+# 次常用的 ffmpeg 存放位置（除了根目录，也顺手找找这些）
+_FFMPEG_EXTRA_DIRS = ("bin", "ffmpeg", "ffmpeg/bin", "tools", "tools/ffmpeg",
+                      "tools/ffmpeg/bin")
+
+_FFMPEG_NAMES = ("ffmpeg.exe", "ffmpeg") if os.name == "nt" else ("ffmpeg",)
+
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+_ffmpeg_path = None          # 缓存查找结果
+_ffmpeg_checked = False
+
+
+def _iter_ffmpeg_candidates():
+    """按优先级列出可能存在的 ffmpeg 可执行文件路径"""
+    app_dir = _app_dir()
+    roots = [app_dir]
+    bundle = getattr(sys, "_MEIPASS", "")
+    if bundle and bundle not in roots:
+        roots.append(bundle)
+
+    for root in roots:
+        for name in _FFMPEG_NAMES:
+            yield os.path.join(root, name)
+        for extra in _FFMPEG_EXTRA_DIRS:
+            for name in _FFMPEG_NAMES:
+                yield os.path.join(root, *extra.split("/"), name)
+
+    # 根目录下形如 ffmpeg-7.1-full_build/ 的解压目录
+    try:
+        for entry in sorted(os.listdir(app_dir)):
+            full = os.path.join(app_dir, entry)
+            if not os.path.isdir(full) or not entry.lower().startswith("ffmpeg"):
+                continue
+            for name in _FFMPEG_NAMES:
+                yield os.path.join(full, name)
+                yield os.path.join(full, "bin", name)
+    except Exception:
+        pass
+
+
+def find_ffmpeg(recheck=False):
+    """返回可用的 ffmpeg 路径；找不到返回 None
+
+    顺序：项目根目录及常见子目录 → 系统 PATH。
+    结果会缓存，避免每次转码都扫目录。
+    """
+    global _ffmpeg_path, _ffmpeg_checked
+    if _ffmpeg_checked and not recheck:
+        return _ffmpeg_path
+
+    _ffmpeg_checked = True
+    _ffmpeg_path = None
+
+    for candidate in _iter_ffmpeg_candidates():
+        try:
+            if os.path.isfile(candidate):
+                _ffmpeg_path = candidate
+                return _ffmpeg_path
+        except Exception:
+            continue
+
+    # 退回系统 PATH
+    found = shutil.which("ffmpeg")
+    if found:
+        _ffmpeg_path = found
+    return _ffmpeg_path
+
+
+def describe_ffmpeg() -> str:
+    """给界面/日志用的一句话说明"""
+    path = find_ffmpeg()
+    if path:
+        return f"已找到 ffmpeg：{path}"
+    return ("未找到 ffmpeg。把 ffmpeg.exe 放到程序根目录即可自动启用"
+            "（下载地址 https://ffmpeg.org 或 https://www.gyan.dev/ffmpeg/builds/）")
 
 
 # ============================================================
@@ -116,21 +204,27 @@ def prune_cache():
 
 
 def convert_to_mp3(src: str, workdir: str = None):
-    """用 ffmpeg 转 mp3，失败返回 None"""
-    if not shutil.which("ffmpeg"):
+    """用 ffmpeg 转 mp3，失败返回 None
+
+    ffmpeg 优先用项目根目录里的那一份（见 find_ffmpeg）。
+    """
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
         return None
     workdir = workdir or os.path.dirname(src) or tempfile.gettempdir()
     base = os.path.splitext(os.path.basename(src))[0]
     dst = os.path.join(workdir, base + ".conv.mp3")
     try:
         subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-i", src, "-vn",
+            [ffmpeg, "-y", "-loglevel", "error", "-i", src, "-vn",
              "-acodec", "libmp3lame", "-q:a", "2", dst],
             check=True, timeout=300,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=CREATE_NO_WINDOW,
         )
         return dst if os.path.exists(dst) and os.path.getsize(dst) > 1024 else None
-    except Exception:
+    except Exception as exc:
+        print(f"[播放器] ffmpeg 转码失败: {exc}")
         return None
 
 
@@ -489,8 +583,11 @@ class MusicPlayer:
                 path,
                 workdir=CACHE_DIR if is_url else os.path.dirname(path) or None)
             if not converted:
-                self._fail(generation, "无法播放该格式，请安装 ffmpeg："
-                                       "https://ffmpeg.org")
+                if not find_ffmpeg():
+                    self._fail(generation, "无法播放该格式：缺 ffmpeg。"
+                                           "把 ffmpeg.exe 放到程序根目录即可")
+                else:
+                    self._fail(generation, "无法播放该格式，ffmpeg 转码也失败了")
                 return
             if not is_url:
                 self._local_files.append(converted)

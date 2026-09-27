@@ -72,6 +72,7 @@ def make_track(platform: str, raw: dict) -> dict:
         "artists": clean_text(artists),
         "album": clean_text(album),
         "duration": int(raw.get("duration") or 0),
+        "cover": clean_text(raw.get("cover") or ""),
         "local_path": raw.get("local_path") or "",
         "added_at": int(time.time()),
     }

@@ -19,6 +19,37 @@ import tkinter as tk  # noqa: E402
 
 FAILURES = []
 
+# 自检会写账号/歌单，跑之前把真实文件挪开，跑完再放回去
+CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+CONFIG_BACKUP = CONFIG_FILE + ".selftest-backup"
+PLAYLIST_FILE = os.path.join(BASE_DIR, "playlists.json")
+PLAYLIST_BACKUP = PLAYLIST_FILE + ".selftest-backup"
+
+
+def _stash_real_files():
+    for path, backup in ((CONFIG_FILE, CONFIG_BACKUP),
+                         (PLAYLIST_FILE, PLAYLIST_BACKUP)):
+        try:
+            if os.path.exists(backup):
+                os.unlink(backup)
+            if os.path.exists(path):
+                os.replace(path, backup)
+        except Exception as exc:
+            print(f"[自检] 备份 {os.path.basename(path)} 失败: {exc}")
+
+
+def _restore_real_files():
+    for path, backup in ((CONFIG_FILE, CONFIG_BACKUP),
+                         (PLAYLIST_FILE, PLAYLIST_BACKUP)):
+        try:
+            if os.path.exists(path):
+                os.unlink(path)
+            if os.path.exists(backup):
+                os.replace(backup, path)
+        except Exception as exc:
+            print(f"[自检] 还原 {os.path.basename(path)} 失败: {exc}")
+
+
 ICON_NAMES = [
     "play", "pause", "stop", "next", "prev", "sequential", "shuffle",
     "repeat_one", "volume", "volume_mute", "plus", "minus", "close",
@@ -35,7 +66,18 @@ def check(condition, label):
 
 
 def main():
-    print("=== 1. 模块导入 ===")
+    print("=== 0. 保护真实数据 ===")
+    _stash_real_files()
+    print(f"[OK  ] 真实 config.json / playlists.json 已临时移开，"
+          f"跑完自动还原")
+    try:
+        return _run_checks()
+    finally:
+        _restore_real_files()
+
+
+def _run_checks():
+    print("\n=== 1. 模块导入 ===")
     import theme as T
     import icons
     import widgets as W
@@ -195,7 +237,106 @@ def main():
     check(not bad_icons, f"全部 {len(ICON_NAMES)} 个图标可绘制"
                          + (f" — 异常: {bad_icons}" if bad_icons else ""))
 
-    print("\n=== 5. 界面构建 ===")
+    print("\n=== 5. 账号管理逻辑（纯逻辑，不碰真实 config.json） ===")
+    import accounts as A
+
+    cfg = {"netease": {"cookie": "", "accounts": [], "current": ""},
+           "qqmusic": {"cookie": "", "accounts": [], "current": ""},
+           "kugou": {"cookie": "", "accounts": [], "current": ""},
+           "qishui": {"cookie": "", "accounts": [], "current": ""},
+           "bilibili": {"sessdata": "", "bili_jct": "",
+                        "accounts": [], "current": ""}}
+    store = A.AccountStore(cfg, save=None)
+
+    acc1, created1 = store.add("netease", {"cookie": "MUSIC_U=AAA"},
+                               label="小号", method="cookie")
+    check(acc1 is not None and created1, "新增账号成功")
+    check(store.current_id("netease") == acc1["id"], "第一个账号自动成为当前账号")
+    check(cfg["netease"]["cookie"] == "MUSIC_U=AAA",
+          "旧字段被同步（向后兼容）")
+
+    # 同凭据重复添加 → 更新而不是新建
+    again, created2 = store.add("netease", {"cookie": "MUSIC_U=AAA"},
+                                label="小号改名")
+    check(not created2 and again["id"] == acc1["id"], "同凭据不会重复建账号")
+    check(again["label"] == "小号改名", "同凭据会更新标签")
+
+    # 第二个账号
+    acc2, _ = store.add("netease", {"cookie": "MUSIC_U=BBB"}, label="大号")
+    check(len(store.accounts("netease")) == 2, "一个平台可存 2 个账号")
+    check(store.current_id("netease") == acc2["id"], "新账号成为当前账号")
+
+    # 切回第一个
+    check(store.set_current("netease", acc1["id"]), "切换账号成功")
+    check(store.current_cred("netease")["cookie"] == "MUSIC_U=AAA",
+          "切换后取到正确凭据")
+    check(cfg["netease"]["cookie"] == "MUSIC_U=AAA", "切换后旧字段同步更新")
+
+    # 「更新当前账号」路径
+    updated, created3 = store.add("netease", {"cookie": "MUSIC_U=CCC"},
+                                  label="小号", prefer_id=acc1["id"])
+    check(not created3 and updated["id"] == acc1["id"],
+          "prefer_id 走更新而不是新增")
+    check(store.current_cred("netease")["cookie"] == "MUSIC_U=CCC",
+          "更新后凭据生效")
+    check(len(store.accounts("netease")) == 2, "更新不会增加账号数")
+
+    # 退出登录 / 再切回来
+    check(store.clear_current("netease"), "退出登录")
+    check(store.current("netease") is None, "退出后没有当前账号")
+    check(len(store.accounts("netease")) == 2, "退出登录不删账号记录")
+    check(cfg["netease"]["cookie"] == "", "退出后旧字段被清空")
+    store.set_current("netease", acc2["id"])
+    check(store.current_cred("netease")["cookie"] == "MUSIC_U=BBB",
+          "退出后仍可切回")
+
+    # 删除当前账号 → 自动切到剩下的
+    store.remove("netease", acc2["id"])
+    check(len(store.accounts("netease")) == 1, "删除账号成功")
+    check(store.current_id("netease") == acc1["id"],
+          "删除当前账号后自动切到剩下的")
+
+    # B站双字段
+    bacc, _ = store.add("bilibili", {"sessdata": "SESS-XYZ",
+                                     "bili_jct": "JCT-123"}, label="B站号")
+    check(store.client_kwargs("bilibili")["sessdata"] == "SESS-XYZ",
+          "B站 client_kwargs 正确")
+    check("cookie" not in store.client_kwargs("bilibili"),
+          "B站 client_kwargs 不含 cookie")
+    check(store.client_kwargs("netease") == {"cookie": "MUSIC_U=CCC"},
+          "网易云 client_kwargs 正确")
+
+    # 凭据校验
+    bad, bad_created = store.add("bilibili", {"bili_jct": "只有jct没有sessdata"})
+    check(bad is None and not bad_created, "缺关键字段的凭据会被拒绝")
+
+    # 旧配置迁移
+    legacy = {"netease": {"cookie": "OLD-MUSIC-U", "accounts": [],
+                          "current": ""},
+              "bilibili": {"sessdata": "OLD-SESS", "bili_jct": "OLD-JCT",
+                           "accounts": [], "current": ""},
+              "qqmusic": {"cookie": "", "accounts": [], "current": ""},
+              "kugou": {"cookie": "", "accounts": [], "current": ""},
+              "qishui": {"cookie": "", "accounts": [], "current": ""}}
+    migrated = A.AccountStore(legacy, save=None).migrate_legacy()
+    check(migrated == 2, f"旧配置迁移 2 条（实际 {migrated}）")
+    migrated_store = A.AccountStore(legacy, save=None)
+    check(migrated_store.current_cred("netease")["cookie"] == "OLD-MUSIC-U",
+          "迁移后网易云凭据可用")
+    check(migrated_store.current_cred("bilibili")["sessdata"] == "OLD-SESS",
+          "迁移后 B站凭据可用")
+    check(A.AccountStore(legacy, save=None).migrate_legacy() == 0,
+          "重复迁移不会产生重复账号")
+
+    # 账号摘要
+    summary = store.summary_text()
+    check("已登录" in summary or "未登录" in summary,
+          f"侧边栏摘要文案可用：{summary}")
+    counts = store.counts()
+    check(set(counts.keys()) == set(app_gui.T.PLATFORM_KEYS),
+          "counts() 覆盖 5 个平台")
+
+    print("\n=== 6. 界面构建 ===")
     app = None
     try:
         app = app_gui.PlayerApp(root)
@@ -206,14 +347,16 @@ def main():
         check(app.library_tree is not None, "全部音乐表存在")
         check(app.mode_btn is not None, "播放模式按钮存在")
         check(app.seekbar is not None, "进度条存在")
-        check(len(app.nav_buttons) == 3, "侧边栏导航 3 项")
+        check(len(app.nav_buttons) == 4, "侧边栏导航 4 项（含账号管理）")
+        check(app.acct_inner is not None, "账号管理视图存在")
 
         # 各视图切换
         for view in (app_gui.VIEW_LIBRARY, app_gui.VIEW_PLAYLIST,
-                     app_gui.VIEW_DOWNLOAD, app_gui.VIEW_SEARCH):
+                     app_gui.VIEW_DOWNLOAD, app_gui.VIEW_ACCOUNTS,
+                     app_gui.VIEW_SEARCH):
             app._switch_view(view)
             root.update()
-        check(True, "四个视图切换无异常")
+        check(True, "五个视图切换无异常")
 
         # 填入搜索结果
         app._display_results({"netease": items, "bilibili": [bili]}, {},
@@ -244,6 +387,49 @@ def main():
         root.update()
         check(len(app._download_rows) == 3, "下载队列渲染 3 行")
 
+        # 账号管理：加两个账号 → 渲染 → 切换 → 删除
+        a1, _ = app.accounts.add("netease", {"cookie": "SELFTEST-AAA"},
+                                 label="自检号A", method="cookie")
+        a2, _ = app.accounts.add("netease", {"cookie": "SELFTEST-BBB"},
+                                 label="自检号B", method="cookie")
+        app.accounts.add("bilibili", {"sessdata": "SELFTEST-SESS",
+                                      "bili_jct": "SELFTEST-JCT"},
+                         label="自检B站号", method="qr")
+        app._switch_view(app_gui.VIEW_ACCOUNTS)
+        root.update()
+        check(len(app.accounts.accounts("netease")) == 2, "界面层存了 2 个网易云账号")
+        check(app.accounts.current_id("netease") == a2["id"],
+              "最后添加的账号成为当前账号")
+        check(app.accounts.current("bilibili") is not None,
+              "B站账号已保存")
+
+        # 切换账号 → 客户端重建
+        app._switch_account("netease", a1["id"])
+        root.update()
+        check(app.accounts.current_id("netease") == a1["id"], "切换账号生效")
+        check("netease" in app.clients, "切换后客户端仍可用")
+        check(app.active_accounts.get("netease") == "自检号A",
+              f"当前账号标签正确（{app.active_accounts.get('netease')}）")
+        check("已登录" in app.login_status.cget("text"),
+              f"侧边栏状态已刷新：{app.login_status.cget('text')}")
+
+        # 退出登录
+        app.accounts.clear_current("netease")
+        app._init_clients()
+        app._refresh_accounts()
+        root.update()
+        check(app.accounts.current("netease") is None, "退出登录生效")
+        check(len(app.accounts.accounts("netease")) == 2,
+              "退出登录保留账号记录")
+
+        # 清理自检数据，避免污染真实 config
+        for platform in ("netease", "bilibili"):
+            for account in list(app.accounts.accounts(platform)):
+                app.accounts.remove(platform, account["id"])
+        app._refresh_accounts()
+        root.update()
+        check(not app.accounts.accounts("netease"), "自检账号已清理")
+
         app.store.delete(pl["id"])
         app._refresh_playlists()
         root.update()
@@ -271,11 +457,11 @@ def main():
 
     print("\n=== 结果 ===")
     if FAILURES:
-        print(f"❌ {len(FAILURES)} 项失败:")
+        print(f"[FAIL] {len(FAILURES)} 项失败:")
         for item in FAILURES:
             print("   -", item)
         return 1
-    print("✅ 全部自检通过")
+    print("[OK] 全部自检通过")
     return 0
 
 

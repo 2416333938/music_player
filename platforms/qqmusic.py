@@ -24,7 +24,7 @@ class QQMusicClient:
                 self.credential = None
 
     async def search(self, keyword: str, limit: int = 10):
-        """搜索歌曲，返回 [{mid, name, artists, album, duration}]"""
+        """搜索歌曲，返回 [{mid, name, artists, album, duration, cover}]"""
         async with Client(credential=self.credential) as client:
             songs_raw = await client.search.search_by_type(
                 keyword, SearchType.SONG, num=limit, page=1
@@ -32,15 +32,22 @@ class QQMusicClient:
 
         songs = []
         for item in songs_raw:
+            album = item.album
+            cover = ""
+            try:
+                cover = item.cover_url or (album.cover_url if album else "") or ""
+            except Exception:
+                cover = ""
             songs.append({
                 "mid": item.mid,
                 "name": item.name or item.title or "",
                 "artists": "/".join(
                     s.name for s in (item.singer or []) if s.name
                 ),
-                "album": (item.album.name if item.album else "") or "",
+                "album": (album.name if album else "") or "",
                 # QQ音乐返回的是秒
                 "duration": int(item.interval or 0),
+                "cover": cover,
             })
         return songs
 

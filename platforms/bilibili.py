@@ -45,11 +45,15 @@ class BilibiliClient:
         )
         videos = []
         for item in results.get("result", [])[:limit]:
+            pic = item.get("pic") or ""
+            if pic.startswith("//"):
+                pic = "https:" + pic
             videos.append({
                 "bvid": item.get("bvid"),
                 "title": item.get("title"),
                 "author": item.get("author"),
                 "duration": _parse_duration(item),
+                "cover": pic,
             })
         return videos
 

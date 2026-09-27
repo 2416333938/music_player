@@ -19,6 +19,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog
 from tkinter import messagebox
@@ -34,6 +35,7 @@ BASE_DIR = _base_dir()
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
+import accounts as A                                     # noqa: E402
 import icons                                            # noqa: E402
 import theme as T                                       # noqa: E402
 import tray                                             # noqa: E402
@@ -44,7 +46,7 @@ from downloader import (DownloadManager, default_download_dir,  # noqa: E402
                         STATUS_WAITING, STATUS_TEXT)
 from play_queue import (MODE_META, MODE_SHUFFLE, PlayQueue,  # noqa: E402
                         mode_from_config)
-from player import MusicPlayer                          # noqa: E402
+from player import MusicPlayer, find_ffmpeg            # noqa: E402
 
 APP_TITLE = "多平台音乐播放器"
 APP_VERSION = "2.0"
@@ -53,6 +55,7 @@ VIEW_SEARCH = "search"
 VIEW_LIBRARY = "library"
 VIEW_PLAYLIST = "playlist"
 VIEW_DOWNLOAD = "download"
+VIEW_ACCOUNTS = "accounts"
 VIEW_LOGIN = "login"
 
 QUICK_KEYWORDS = ["热门推荐", "华语流行", "轻音乐", "纯音乐", "摇滚", "B站音乐"]
@@ -482,6 +485,7 @@ class PlayerApp:
         app_cfg.setdefault("volume", 0.7)
 
         self.store = tray.PlaylistStore()
+        self.accounts = A.AccountStore(self.cfg, save=self._persist_config)
         self.player = MusicPlayer()
         self.player.set_volume(float(app_cfg.get("volume") or 0.7))
         self.queue = PlayQueue(
@@ -514,6 +518,7 @@ class PlayerApp:
         self._download_rows = {}
         self._playlist_rows = []
         self._login_dialog = None
+        self._login_intent = None       # (platform, "new"/"auto")
         self._library = {}
         self._library_cache = {}
         self._library_cache_tracks = []
@@ -530,6 +535,7 @@ class PlayerApp:
         self._refresh_playlists()
         self._refresh_library()
         self._refresh_downloads()
+        self._refresh_accounts()
         self._update_mode_button()
         self._update_volume_icon()
         self._switch_view(VIEW_SEARCH)
@@ -546,40 +552,53 @@ class PlayerApp:
         if not self.player.mixer_ok:
             self.root.after(600, lambda: W.Toast.show(
                 self.root, "音频设备不可用，播放会没有声音", "warn", 4000))
+        elif find_ffmpeg() is None:
+            # ffmpeg 只用于兜底转码，缺了不影响播放 mp3
+            self.root.after(1800, lambda: W.Toast.show(
+                self.root,
+                "未找到 ffmpeg：把 ffmpeg.exe 放到程序根目录即可播放 flac/m4a 等格式",
+                "info", 5600))
 
     # ==================================================
     # 平台客户端
     # ==================================================
     def _init_clients(self):
-        """（重新）实例化各平台客户端，登录成功后可热重载"""
+        """（重新）实例化各平台客户端
+
+        凭据统一从「当前账号」取（见 accounts.AccountStore），
+        所以切换账号后调一次这个函数就完成了热切换。
+        """
         clients = {}
+        active = {}
 
         def safe(key, factory):
             try:
                 clients[key] = factory()
+                account = self.accounts.current(key)
+                active[key] = account.get("label", "") if account else ""
             except Exception as exc:
                 print(f"[{T.platform_name(key)}] 初始化失败: {exc}")
+                active[key] = ""
 
         def netease():
             from platforms.netease import NeteaseClient
-            return NeteaseClient(self.cfg.get("netease", {}).get("cookie") or None)
+            return NeteaseClient(**self.accounts.client_kwargs("netease"))
 
         def qqmusic():
             from platforms.qqmusic import QQMusicClient
-            return QQMusicClient(self.cfg.get("qqmusic", {}).get("cookie") or None)
+            return QQMusicClient(**self.accounts.client_kwargs("qqmusic"))
 
         def kugou():
             from platforms.kugou import KugouClient
-            return KugouClient(self.cfg.get("kugou", {}).get("cookie") or None)
+            return KugouClient(**self.accounts.client_kwargs("kugou"))
 
         def qishui():
             from platforms.qishui import QishuiClient
-            return QishuiClient(self.cfg.get("qishui", {}).get("cookie") or None)
+            return QishuiClient(**self.accounts.client_kwargs("qishui"))
 
         def bilibili():
             from platforms.bilibili import BilibiliClient
-            cfg = self.cfg.get("bilibili", {})
-            return BilibiliClient(cfg.get("sessdata"), cfg.get("bili_jct"))
+            return BilibiliClient(**self.accounts.client_kwargs("bilibili"))
 
         safe("netease", netease)
         safe("qqmusic", qqmusic)
@@ -588,6 +607,7 @@ class PlayerApp:
         safe("bilibili", bilibili)
 
         self.clients = clients
+        self.active_accounts = active
         self.queue.set_clients(clients)
 
     # ==================================================
@@ -635,6 +655,7 @@ class PlayerApp:
             (VIEW_SEARCH, "搜索", "search"),
             (VIEW_LIBRARY, "全部音乐", "music"),
             (VIEW_DOWNLOAD, "下载管理", "download"),
+            (VIEW_ACCOUNTS, "账号管理", "gear"),
         ]
         for key, label, icon in nav_items:
             self.nav_buttons[key] = self._make_nav_button(label, icon,
@@ -656,7 +677,7 @@ class PlayerApp:
         self.playlist_box = tk.Frame(self.sidebar, bg=T.SIDEBAR)
         self.playlist_box.pack(fill=tk.BOTH, expand=True, padx=6, pady=(2, 8))
 
-        # 底部：登录 / 设置
+        # 底部：账号状态（点一下进账号管理）
         tk.Frame(self.sidebar, bg=T.BORDER_SOFT, height=1).pack(
             fill=tk.X, padx=14, pady=(4, 8))
 
@@ -665,17 +686,31 @@ class PlayerApp:
         self.login_btn = tk.Frame(bottom, bg=T.SIDEBAR_HOVER, cursor="hand2")
         self.login_btn.pack(fill=tk.X)
         inner = tk.Frame(self.login_btn, bg=T.SIDEBAR_HOVER)
-        inner.pack(fill=tk.X, padx=10, pady=9)
-        login_canvas = tk.Canvas(inner, width=18, height=18,
+        inner.pack(fill=tk.X, padx=10, pady=(8, 8))
+        row1 = tk.Frame(inner, bg=T.SIDEBAR_HOVER)
+        row1.pack(fill=tk.X)
+        login_canvas = tk.Canvas(row1, width=18, height=18,
                                  bg=T.SIDEBAR_HOVER, highlightthickness=0,
                                  bd=0)
         login_canvas.pack(side=tk.LEFT)
-        icons.draw_icon(login_canvas, "gear", 9, 9, 16, T.ACCENT_TEXT)
-        self.login_label = tk.Label(inner, text="账号登录", bg=T.SIDEBAR_HOVER,
+        self.login_icon = login_canvas
+        self.login_label = tk.Label(row1, text="账号管理", bg=T.SIDEBAR_HOVER,
                                     fg=T.TEXT, font=self.fonts.small)
         self.login_label.pack(side=tk.LEFT, padx=(8, 0))
-        for widget in (self.login_btn, inner, login_canvas, self.login_label):
-            widget.bind("<Button-1>", lambda e: self.open_login())
+        # 每个平台的登录状态小圆点
+        self.account_dots = tk.Frame(row1, bg=T.SIDEBAR_HOVER)
+        self.account_dots.pack(side=tk.RIGHT)
+
+        self.login_status = tk.Label(inner, text="未登录任何平台",
+                                     bg=T.SIDEBAR_HOVER, fg=T.TEXT_3,
+                                     font=self.fonts.tiny, anchor="w",
+                                     wraplength=T.SIDEBAR_W - 46,
+                                     justify=tk.LEFT)
+        self.login_status.pack(fill=tk.X, pady=(3, 0))
+
+        for widget in (self.login_btn, inner, row1, login_canvas,
+                       self.login_label, self.login_status, self.account_dots):
+            widget.bind("<Button-1>", lambda e: self._switch_view(VIEW_ACCOUNTS))
         self._bind_hover(self.login_btn, T.SIDEBAR_HOVER, T.ELEVATED)
 
     def _bind_hover(self, widget, normal, hover):
@@ -774,6 +809,7 @@ class PlayerApp:
         self.views[VIEW_LIBRARY] = self._build_library_view()
         self.views[VIEW_PLAYLIST] = self._build_playlist_view()
         self.views[VIEW_DOWNLOAD] = self._build_download_view()
+        self.views[VIEW_ACCOUNTS] = self._build_accounts_view()
 
     # ---- 搜索视图 ----
     def _build_search_view(self):
@@ -980,6 +1016,346 @@ class PlayerApp:
         self.dl_empty.pack(pady=60)
         return view
 
+    # ---- 账号管理视图 ----
+    def _build_accounts_view(self):
+        view = tk.Frame(self.container, bg=T.BG)
+
+        # 顶部工具条
+        bar = tk.Frame(view, bg=T.BG)
+        bar.pack(fill=tk.X, pady=(6, 6))
+
+        self.acct_summary = tk.Label(bar, text="", bg=T.BG, fg=T.TEXT_2,
+                                     font=self.fonts.small, anchor="w")
+        self.acct_summary.pack(side=tk.LEFT)
+
+        W.PrimaryButton(bar, "添加账号", icon="plus",
+                        command=lambda: self.open_login(mode="new"),
+                        bg=T.ACCENT, fg=T.TEXT_ON_ACCENT,
+                        hover_bg=T.ACCENT_HOVER, panel_bg=T.BG,
+                        min_width=112).pack(side=tk.RIGHT)
+
+        hint = tk.Label(
+            view,
+            text="一个平台可以保存多个账号，点「切换」即可让播放器改用那个账号"
+                 "（切换后立即生效，无需重启）。凭据只存在本机的 config.json 里。",
+            bg=T.BG, fg=T.TEXT_3, font=self.fonts.tiny, anchor="w",
+            justify=tk.LEFT)
+        hint.pack(fill=tk.X, pady=(0, 10))
+
+        wrap = tk.Frame(view, bg=T.PANEL, highlightthickness=1,
+                        highlightbackground=T.BORDER)
+        wrap.pack(fill=tk.BOTH, expand=True)
+        self.acct_scroll = W.ScrollFrame(wrap, bg=T.PANEL)
+        self.acct_scroll.pack(fill=tk.BOTH, expand=True)
+        self.acct_inner = self.acct_scroll.body
+        return view
+
+    # ==================================================
+    # 账号管理：渲染与操作
+    # ==================================================
+    def _refresh_accounts(self):
+        """重画账号管理页 + 侧边栏状态"""
+        if not self._alive:
+            return
+        self._refresh_account_status()
+        inner = getattr(self, "acct_inner", None)
+        if inner is None:
+            return
+        try:
+            for child in inner.winfo_children():
+                child.destroy()
+            counts = self.accounts.counts()
+            logged = self.accounts.logged_in_platforms()
+            total = sum(item["total"] for item in counts.values())
+            self.acct_summary.configure(
+                text=f"共 {total} 个账号 · 已登录 {len(logged)}/5 个平台")
+
+            for platform in T.PLATFORM_KEYS:
+                self._build_platform_section(inner, platform, counts[platform])
+            inner.update_idletasks()
+            self.acct_scroll.canvas.configure(
+                scrollregion=self.acct_scroll.canvas.bbox("all"))
+        except Exception as exc:
+            print("[账号] 刷新失败:", exc)
+
+    def _build_platform_section(self, parent, platform, info):
+        fonts = self.fonts
+        color = T.platform_color(platform)
+
+        section = tk.Frame(parent, bg=T.PANEL)
+        section.pack(fill=tk.X, padx=10, pady=(10, 4))
+
+        # ---- 平台标题行 ----
+        head = tk.Frame(section, bg=T.PANEL)
+        head.pack(fill=tk.X)
+
+        dot = tk.Canvas(head, width=16, height=16, bg=T.PANEL,
+                        highlightthickness=0, bd=0)
+        dot.pack(side=tk.LEFT)
+        icons.circle(dot, 8, 8, 5, fill=color, outline=color)
+
+        tk.Label(head, text=T.platform_name(platform), bg=T.PANEL, fg=T.TEXT,
+                 font=fonts.body_bold).pack(side=tk.LEFT, padx=(6, 0))
+
+        if info["total"]:
+            tk.Label(head, text=f"{info['total']} 个账号", bg=T.PANEL,
+                     fg=T.TEXT_3, font=fonts.tiny).pack(side=tk.LEFT,
+                                                        padx=(10, 0))
+        if info["logged_in"]:
+            tk.Label(head, text=f"当前：{info['label']}", bg=T.PANEL,
+                     fg=T.GREEN, font=fonts.small).pack(side=tk.LEFT,
+                                                        padx=(10, 0))
+        else:
+            tk.Label(head, text="未登录", bg=T.PANEL, fg=T.TEXT_3,
+                     font=fonts.small).pack(side=tk.LEFT, padx=(10, 0))
+
+        W.PrimaryButton(head, "添加账号", icon="plus",
+                        command=lambda p=platform: self.open_login(p, "new"),
+                        bg=T.ELEVATED, fg=T.TEXT_2, panel_bg=T.PANEL,
+                        min_width=104, height=28,
+                        font=fonts.tiny).pack(side=tk.RIGHT)
+
+        # ---- 账号列表 ----
+        accounts = self.accounts.accounts(platform)
+        current_id = self.accounts.current_id(platform)
+
+        if not accounts:
+            empty = tk.Frame(section, bg=T.PANEL_ALT)
+            empty.pack(fill=tk.X, pady=(6, 0))
+            tk.Label(empty,
+                     text="还没有保存这个平台的账号。点右上角「添加账号」，"
+                          "用扫码或 Cookie 登录一次即可保存。",
+                     bg=T.PANEL_ALT, fg=T.TEXT_3, font=fonts.tiny,
+                     anchor="w", justify=tk.LEFT, wraplength=760,
+                     padx=12, pady=10).pack(fill=tk.X)
+        else:
+            for account in accounts:
+                self._build_account_card(section, platform, account,
+                                         account.get("id") == current_id)
+
+        tk.Frame(parent, bg=T.BORDER_SOFT, height=1).pack(
+            fill=tk.X, padx=10, pady=(8, 0))
+
+    def _build_account_card(self, parent, platform, account, is_current):
+        fonts = self.fonts
+        account_id = account.get("id")
+
+        card_bg = T.ACCENT_SOFT if is_current else T.PANEL_ALT
+        card = tk.Frame(parent, bg=card_bg, highlightthickness=1,
+                        highlightbackground=T.ACCENT if is_current else T.BORDER)
+        card.pack(fill=tk.X, pady=(6, 0))
+
+        left = tk.Frame(card, bg=card_bg)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=12, pady=9)
+
+        name_row = tk.Frame(left, bg=card_bg)
+        name_row.pack(fill=tk.X)
+        tk.Label(name_row, text=account.get("label") or "未命名",
+                 bg=card_bg, fg=T.TEXT, font=fonts.body_bold).pack(side=tk.LEFT)
+        if is_current:
+            badge = tk.Label(name_row, text=" 使用中 ", bg=T.ACCENT,
+                             fg=T.TEXT_ON_ACCENT, font=fonts.tiny,
+                             padx=4)
+            badge.pack(side=tk.LEFT, padx=(8, 0))
+
+        method = A.METHOD_LABELS.get(account.get("method") or "",
+                                     account.get("method") or "已保存")
+        last_used = account.get("last_used") or account.get("created_at") or 0
+        when = time.strftime("%Y-%m-%d %H:%M",
+                             time.localtime(last_used)) if last_used else "—"
+        meta = f"{method} · 最近使用 {when} · {A.cred_preview(platform, account.get('cred') or {})}"
+        tk.Label(left, text=meta, bg=card_bg, fg=T.TEXT_3, font=fonts.tiny,
+                 anchor="w", justify=tk.LEFT, wraplength=560).pack(
+            fill=tk.X, pady=(3, 0))
+
+        # ---- 右侧按钮 ----
+        actions = tk.Frame(card, bg=card_bg)
+        actions.pack(side=tk.RIGHT, padx=(0, 10))
+
+        if is_current:
+            W.PrimaryButton(actions, "退出登录", icon="close",
+                            command=lambda p=platform: self._logout_account(p),
+                            bg=T.ELEVATED, fg=T.TEXT_2, panel_bg=card_bg,
+                            min_width=100, height=30,
+                            font=fonts.tiny).pack(side=tk.RIGHT, padx=3)
+            W.PrimaryButton(actions, "重新登录", icon="refresh",
+                            command=lambda p=platform: self.open_login(p),
+                            bg=T.ELEVATED, fg=T.TEXT_2, panel_bg=card_bg,
+                            min_width=100, height=30,
+                            font=fonts.tiny).pack(side=tk.RIGHT, padx=3)
+        else:
+            W.PrimaryButton(actions, "切换到此账号", icon="check",
+                            command=lambda p=platform, a=account_id:
+                                self._switch_account(p, a),
+                            bg=T.ACCENT, fg=T.TEXT_ON_ACCENT,
+                            hover_bg=T.ACCENT_HOVER, panel_bg=card_bg,
+                            min_width=124, height=30,
+                            font=fonts.tiny).pack(side=tk.RIGHT, padx=3)
+            W.PrimaryButton(actions, "重新登录", icon="refresh",
+                            command=lambda p=platform: self.open_login(p),
+                            bg=T.ELEVATED, fg=T.TEXT_2, panel_bg=card_bg,
+                            min_width=100, height=30,
+                            font=fonts.tiny).pack(side=tk.RIGHT, padx=3)
+
+        W.IconButton(actions, "trash", size=30, icon_size=15,
+                     bg=card_bg, hover_bg=T.HOVER, fg=T.TEXT_3,
+                     tooltip="删除这个账号",
+                     command=lambda p=platform, a=account_id:
+                         self._delete_account(p, a)).pack(side=tk.RIGHT,
+                                                          padx=(3, 0))
+        W.IconButton(actions, "gear", size=30, icon_size=15,
+                     bg=card_bg, hover_bg=T.HOVER, fg=T.TEXT_3,
+                     tooltip="重命名",
+                     command=lambda p=platform, a=account_id:
+                         self._rename_account(p, a)).pack(side=tk.RIGHT,
+                                                          padx=(3, 0))
+
+    def _refresh_account_status(self):
+        """侧边栏底部：登录概况 + 每平台状态点"""
+        try:
+            counts = self.accounts.counts()
+            self.login_status.configure(text=self.accounts.summary_text())
+            self.login_icon.delete("all")
+            icons.draw_icon(self.login_icon, "gear", 9, 9, 16,
+                            T.ACCENT_TEXT)
+            for child in self.account_dots.winfo_children():
+                child.destroy()
+            for platform in T.PLATFORM_KEYS:
+                info = counts[platform]
+                canvas = tk.Canvas(self.account_dots, width=14, height=14,
+                                   bg=T.SIDEBAR_HOVER, highlightthickness=0,
+                                   bd=0)
+                canvas.pack(side=tk.LEFT)
+                color = T.platform_color(platform) if info["logged_in"] \
+                    else T.BORDER
+                icons.circle(canvas, 7, 7, 4, fill=color, outline=color)
+                W.Tooltip(canvas, f"{T.platform_name(platform)}："
+                                  + (info["label"] if info["logged_in"]
+                                     else "未登录"))
+        except Exception as exc:
+            print("[账号] 侧边栏状态刷新失败:", exc)
+
+    # ---------------- 账号操作 ----------------
+    def _switch_account(self, platform, account_id):
+        if not self.accounts.set_current(platform, account_id):
+            W.Toast.show(self.root, "切换失败：账号不存在", "error")
+            return
+        self._persist_config()
+        self._init_clients()
+        self._refresh_accounts()
+        account = self.accounts.get(platform, account_id)
+        name = T.platform_name(platform)
+        label = account.get("label", "") if account else ""
+        W.Toast.show(self.root, f"已切换到 {name}：{label}", "ok", 2600)
+
+    def _logout_account(self, platform):
+        account = self.accounts.current(platform)
+        if account is None:
+            W.Toast.show(self.root, "这个平台本来就没登录", "info")
+            return
+        name = T.platform_name(platform)
+        if not W.ConfirmDialog(
+                self.root, "退出登录",
+                f"退出 {name} 的「{account.get('label')}」？\n"
+                f"账号记录会保留在列表里，随时可以再切回来。",
+                ok_text="退出登录").show():
+            return
+        self.accounts.clear_current(platform)
+        self._persist_config()
+        self._init_clients()
+        self._refresh_accounts()
+        W.Toast.show(self.root, f"已退出 {name}", "ok")
+
+    def _rename_account(self, platform, account_id):
+        account = self.accounts.get(platform, account_id)
+        if account is None:
+            return
+        label = W.PromptDialog(
+            self.root, "重命名账号",
+            f"{T.platform_name(platform)} 的这个账号叫什么？",
+            initial=account.get("label", ""), ok_text="保存").show()
+        if not label or label == account.get("label"):
+            return
+        if self.accounts.rename(platform, account_id, label):
+            self._persist_config()
+            self._refresh_accounts()
+            W.Toast.show(self.root, "已重命名", "ok")
+
+    def _delete_account(self, platform, account_id):
+        account = self.accounts.get(platform, account_id)
+        if account is None:
+            return
+        name = T.platform_name(platform)
+        is_current = self.accounts.current_id(platform) == account_id
+        message = (f"删除 {name} 的「{account.get('label')}」？\n"
+                   "只删除本地保存的登录凭据，不影响你的平台账号。")
+        if is_current and len(self.accounts.accounts(platform)) > 1:
+            message += "\n删除后会切到列表里的下一个账号。"
+        if not W.ConfirmDialog(self.root, "删除账号", message,
+                               ok_text="删除", danger=True).show():
+            return
+        self.accounts.remove(platform, account_id)
+        self._persist_config()
+        self._init_clients()
+        self._refresh_accounts()
+        W.Toast.show(self.root, f"已删除 {name} 的账号", "ok")
+
+    def _persist_config(self):
+        try:
+            save_config(self.cfg)
+        except Exception as exc:
+            print("[账号] 保存配置失败:", exc)
+
+    # ---------------- 登录对话框对接 ----------------
+    def _login_save_options(self, platform):
+        """告诉登录对话框：这次登录是新增还是更新已有账号"""
+        account = self.accounts.current(platform)
+        total = len(self.accounts.accounts(platform))
+        if account:
+            return {
+                "mode": "update",
+                "label": account.get("label", ""),
+                "placeholder": f"登录成功后会覆盖「{account.get('label')}」的凭据，"
+                               f"该平台已保存 {total} 个账号",
+                "confirm_text": "更新当前账号",
+            }
+        return {
+            "mode": "new",
+            "label": "",
+            "placeholder": f"该平台已保存 {total} 个账号；留空会自动命名",
+            "confirm_text": "保存账号",
+        }
+
+    def _save_account_credential(self, platform, cred, method, label):
+        """登录成功后落盘成账号，返回 (label, created)"""
+        intent = getattr(self, "_login_intent", None)
+        if intent and intent[0] != platform:
+            intent = None
+
+        current = self.accounts.current(platform)
+        prefer_id = ""
+        if intent and intent[1] == "update" and current is not None:
+            prefer_id = current.get("id", "")
+        # 没有指定意图时，默认「覆盖当前账号」，避免同一个账号重复堆积
+        elif intent is None and current is not None:
+            prefer_id = current.get("id", "")
+
+        created = True
+        if not label:
+            existing = self.accounts.get(platform, prefer_id) if prefer_id \
+                else self.accounts.find_by_cred(platform, cred)
+            label = (existing or {}).get("label") or \
+                self.accounts._default_label(platform)
+
+        account, created = self.accounts.add(
+            platform, cred, label=label, method=method, make_current=True,
+            prefer_id=prefer_id)
+        self._login_intent = None
+        self._persist_config()
+        self._init_clients()
+        self._ui(self._refresh_accounts)
+        return (account.get("label", "") if account else label, created)
+
     # ---- 通用曲目表格 ----
     def _make_tree(self, parent):
         columns = [c[0] for c in T.TRACK_COLUMNS]
@@ -1171,6 +1547,7 @@ class PlayerApp:
             VIEW_LIBRARY: ("全部音乐", "所有出现过的曲目，随搜随存"),
             VIEW_PLAYLIST: ("播放列表", ""),
             VIEW_DOWNLOAD: ("下载管理", "批量下载队列与进度"),
+            VIEW_ACCOUNTS: ("账号管理", "每个平台可保存多个账号，随时切换"),
         }
         title, subtitle = titles.get(key, ("", ""))
         if key == VIEW_PLAYLIST:
@@ -1183,6 +1560,8 @@ class PlayerApp:
             self._refresh_library()
         elif key == VIEW_DOWNLOAD:
             self._refresh_downloads()
+        elif key == VIEW_ACCOUNTS:
+            self._refresh_accounts()
         self.view_title.configure(text=title)
         self.view_subtitle.configure(text=subtitle)
 
@@ -2168,24 +2547,50 @@ class PlayerApp:
     # ==================================================
     # 登录
     # ==================================================
-    def open_login(self):
+    def open_login(self, platform=None, mode="auto"):
+        """打开登录窗口
+
+        platform 指定时直接跳到该平台页；
+        mode="new" 时把这次登录明确当作新增账号（覆盖当前账号的凭据）。
+        """
         try:
             from login_dialog import LoginDialog
         except Exception as exc:
             W.Toast.show(self.root, f"登录模块加载失败: {exc}", "error")
             return
         try:
-            self._login_dialog = LoginDialog(self.root, self.cfg,
-                                             on_success=self._on_login_success)
+            dialog = LoginDialog(self.root, self.cfg,
+                                 on_success=self._on_login_success,
+                                 save_handler=self._save_account_credential,
+                                 accounts=self.accounts)
+            self._login_dialog = dialog
+            if platform:
+                # 记录这次登录的意图，保存时按它决定新增还是覆盖
+                self._login_intent = (platform, mode)
+                for index, (key, _label) in enumerate(LoginDialog.PLATFORMS):
+                    if key == platform:
+                        try:
+                            dialog.notebook.select(index)
+                            dialog._current_platform = platform
+                            dialog._refresh_current_label()
+                        except Exception:
+                            pass
+                        break
+            else:
+                self._login_intent = None
         except Exception as exc:
+            import traceback
+            traceback.print_exc()
             W.Toast.show(self.root, f"打开登录窗口失败: {exc}", "error")
 
     def _on_login_success(self, platform):
+        """登录对话框保存完账号后回调（此时凭据已入库、客户端已重建）"""
         def apply():
-            self._init_clients()
+            self._refresh_accounts()
+            account = self.accounts.current(platform)
             name = T.platform_name(platform)
-            W.Toast.show(self.root, f"{name} 登录成功，客户端已刷新", "ok")
-            self.login_label.configure(text="账号已登录")
+            label = account.get("label", "") if account else ""
+            W.Toast.show(self.root, f"{name} 已登录：{label}", "ok", 2800)
         self._ui(apply)
 
     # ==================================================

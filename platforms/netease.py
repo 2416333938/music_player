@@ -8,6 +8,15 @@ from pyncm.apis.login import (
 )
 
 
+def _cover_url(url, size: int = 300):
+    """把封面缩到指定尺寸（网易云图片服务支持 URL 参数缩放）"""
+    if not url:
+        return ""
+    if url.endswith(".jpg") or url.endswith(".png"):
+        return f"{url}?param={size}y{size}"
+    return url
+
+
 class NeteaseClient:
     def __init__(self, cookie=None):
         self.session = CreateNewSession()
@@ -32,17 +41,19 @@ class NeteaseClient:
         return True
 
     def search(self, keyword: str, limit: int = 10):
-        """搜索歌曲，返回 [{id, name, artists, album, duration}]"""
+        """搜索歌曲，返回 [{id, name, artists, album, duration, cover}]"""
         result = apis.cloudsearch.GetSearchResult(keyword, stype=1, limit=limit)
         songs = []
         for item in result["result"]["songs"]:
+            album = item.get("al") or {}
             songs.append({
                 "id": item["id"],
                 "name": item["name"],
                 "artists": "/".join(a["name"] for a in item["ar"]),
-                "album": item["al"]["name"],
+                "album": album.get("name", ""),
                 # 网易云返回的是毫秒，统一成秒
                 "duration": int((item.get("dt") or 0) / 1000),
+                "cover": _cover_url(album.get("picUrl")),
             })
         return songs
 

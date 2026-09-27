@@ -360,16 +360,17 @@ def draw_icon(canvas, name, x, y, size=16, color="#ffffff", width=None, tag=None
             fill=color, width=max(1.1, weight * 0.8), capstyle="round")
 
     elif name == "gear":
-        cx, cy, r = (x1 + x2) / 2, (y1 + y2) / 2, w * 0.30
+        cx, cy, r = (x1 + x2) / 2, (y1 + y2) / 2, w * 0.36
         import math
+        # 8 个短齿：太长会变成太阳，这里控制在 0.92r~1.28r
         for i in range(8):
             a = math.radians(i * 45)
             add(canvas.create_line,
-                cx + math.cos(a) * r * 0.92, cy + math.sin(a) * r * 0.92,
-                cx + math.cos(a) * r * 1.42, cy + math.sin(a) * r * 1.42,
-                fill=color, width=max(1.6, weight * 0.95), capstyle="round")
-        add(circle, cx, cy, r * 0.96, outline=color, width=weight, fill="")
-        add(circle, cx, cy, r * 0.34, outline=color,
+                cx + math.cos(a) * r * 0.86, cy + math.sin(a) * r * 0.86,
+                cx + math.cos(a) * r * 1.26, cy + math.sin(a) * r * 1.26,
+                fill=color, width=max(1.8, weight * 1.05), capstyle="round")
+        add(circle, cx, cy, r, outline=color, width=weight, fill="")
+        add(circle, cx, cy, r * 0.32, outline=color,
             width=max(1.2, weight * 0.8), fill="")
 
     elif name == "more":

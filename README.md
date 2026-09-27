@@ -7,11 +7,22 @@
 
 ## 功能
 
+### 账号管理（一个平台可存多个账号）
+- 侧边栏「账号管理」页集中展示**每个平台登录了没有、当前用的是哪个账号**
+  （底部还有 5 个状态圆点，绿=已登录，灰=未登录）
+- **一个平台可以保存多个账号**，点「切换到此账号」立即生效，无需重启
+- 卡片上显示：账号名、登录方式、最近使用时间、凭据打码预览
+- 支持 **添加账号 / 切换 / 重命名 / 删除 / 退出登录 / 重新登录**
+- 凭据只存在本机 `config.json`，不会上传；旧版单账号配置会**自动迁移**成一条账号记录
+
+![账号管理](docs/screenshots/accounts.png)
+
 ### 搜索与播放
 - **跨平台搜索**：一次输入，同时检索全部（或指定）平台，结果汇总到同一列表
 - **播放控制**：播放 / 暂停 / 继续 / 停止，进度条任意拖动跳转，音量 0–100% 实时调节
 - **播放缓存**：同一个地址只下载一次，重复播放、拖动进度都是秒响应
-- **格式兜底**：pygame 解不了的格式（部分 flac/m4a）自动调用 ffmpeg 转码
+- **格式兜底**：pygame 解不了的格式（部分 flac/m4a）自动调用 ffmpeg 转码，
+  把 `ffmpeg.exe` 放根目录就会自动识别（详见「ffmpeg」一节）
 - **B站音频**：按视频搜索，自动挑选最高码率的 dash 音频流播放
 
 ### 播放列表
@@ -60,7 +71,8 @@
 ```
 music_player/
 ├─ main_gui.py          # 图形界面入口（推荐）
-├─ app_gui.py           # 现代深色界面主体：侧边栏 / 搜索 / 歌单 / 下载 / 播放条
+├─ app_gui.py           # 现代深色界面主体：侧边栏 / 搜索 / 歌单 / 下载 / 账号管理 / 播放条
+├─ accounts.py          # 多账号管理：一个平台存多个账号、切换、迁移旧配置
 ├─ theme.py             # 设计系统：配色、字体、ttk 主题（改这一个文件即可换肤）
 ├─ icons.py             # Canvas 矢量图标（播放 / 随机 / 单曲循环 / 音量 …）
 ├─ widgets.py           # 自绘控件：圆角按钮、进度条、滑杆、下拉框、Toast、对话框
@@ -70,7 +82,7 @@ music_player/
 ├─ player.py            # 播放引擎：下载缓存 → 解码播放，ffmpeg 兜底，支持 seek
 ├─ main.py              # 命令行入口
 ├─ login_dialog.py      # 登录对话框（二维码 / 手机号 / Cookie）
-├─ config.py            # 配置读写（缺省键自动补齐，兼容旧版配置）
+├─ config.py            # 配置读写（缺省键自动补齐，旧配置自动迁移）
 ├─ config.json          # 本地登录凭证与偏好（已 gitignore，不入库）
 ├─ playlists.json       # 本地播放列表数据（已 gitignore，不入库）
 ├─ config.example.json  # 配置模板
@@ -85,7 +97,8 @@ music_player/
 ├─ 安装依赖.bat          # 一键安装依赖
 ├─ 启动播放器.bat        # 启动图形界面
 ├─ 命令行版.bat          # 启动命令行版
-└─ auto-py-to-exe.json  # 打包配置（可选）
+├─ auto-py-to-exe.json  # 打包配置（可选）
+└─ ffmpeg.exe           # 可选：自己放进来，用于格式兜底转码（已 gitignore）
 ```
 
 ## 运行
@@ -111,6 +124,9 @@ py -3.11 main_gui.py
 py -3.11 selftest.py
 ```
 
+> 自检会临时把真实的 `config.json` / `playlists.json` 挪开，跑完自动还原，
+> 不会破坏你的登录状态和歌单。
+
 命令行版支持的命令：
 
 ```
@@ -124,10 +140,24 @@ quit                   退出
 
 ## 登录与凭证
 
-登录信息统一保存在 `config.json`，由界面左下角的「账号登录」按钮写入，
+登录信息统一保存在 `config.json`，由界面左下角「账号管理」或「账号登录」写入，
 保存后客户端会**热重载**，无需重启程序。
 
-| 平台 | 支持的登录方式 | 实际存储的字段 |
+每个平台可以保存**多个账号**，结构如下（由 `accounts.py` 维护）：
+
+```json
+"netease": {
+  "cookie": "当前账号的 MUSIC_U（兼容旧版，自动同步）",
+  "accounts": [
+    {"id": "39c33b5774", "label": "我的网易云", "method": "qr",
+     "cred": {"cookie": "MUSIC_U=..."},
+     "created_at": 1700000000, "last_used": 1700000000}
+  ],
+  "current": "39c33b5774"
+}
+```
+
+| 平台 | 支持的登录方式 | `cred` 里存什么 |
 | --- | --- | --- |
 | 网易云 | 扫码 / 手机号 / Cookie | `cookie` = `MUSIC_U` 的值 |
 | QQ音乐 | 扫码 / Cookie | `cookie` = Credential 的 JSON 串 |
@@ -137,6 +167,7 @@ quit                   退出
 
 > 没有 `config.json` 也能启动：`config.py` 会用默认值补齐，匿名状态下仍可搜索。
 > 没有 `playlists.json` 会自动创建，删掉即恢复成「没有歌单」的初始状态。
+> 旧版把凭据直接写在 `cfg['netease']['cookie']` 的配置，第一次启动时会自动迁移。
 
 **安全提示**：`config.json` 里存的是**可用的明文登录凭证**，等同于账号登录态。
 它已加入 `.gitignore`，请勿提交到仓库或分享给他人；如需重置，删除该文件即可。
@@ -148,9 +179,33 @@ quit                   退出
 - **汽水音乐**：返回的播放地址可能是加密内容，需要额外的解密步骤。
 - **B站**：音频取的是 dash 流里码率最高的一条；部分视频需要登录（大会员）才能取到高码率。
 - **格式兼容**：`pygame` 无法直接解码的格式会调用 `ffmpeg` 转成 mp3 兜底；
-  未安装 ffmpeg 时会提示「无法播放该格式」。ffmpeg 下载：<https://ffmpeg.org>
+  未装 ffmpeg 时会提示「无法播放该格式」。ffmpeg 怎么放见下一节。
 - **无音频设备**：`pygame.mixer.init()` 失败时程序不会崩溃，但无法出声。
 - **保留策略**：播放缓存放在 `%TEMP%\music_player_cache`，超过 900MB 会按时间自动清理。
+
+## ffmpeg（可选，但建议装）
+
+ffmpeg 只在 **pygame 解不了某个格式**（部分 flac / m4a / opus）时用来兜底转码成 mp3。
+mp3 正常播放不需要它。
+
+**程序会自动按下面顺序查找 ffmpeg，找到就用，不需要配环境变量：**
+
+1. 程序根目录下的 `ffmpeg.exe`
+2. 根目录下的常见子目录：`bin\`、`ffmpeg\bin\`、`tools\ffmpeg\bin\`
+3. 根目录下任何以 `ffmpeg` 开头的解压目录里的 `ffmpeg.exe` 或 `bin\ffmpeg.exe`
+4. 系统 `PATH`
+
+所以**最省事的做法**：去 <https://www.gyan.dev/ffmpeg/builds/> 下载
+`ffmpeg-release-essentials.zip`，解压后把里面的 `bin\ffmpeg.exe` 复制到
+本项目根目录（和 `main_gui.py` 放一起）即可。
+
+> 注意：`ffmpeg.org` 上的 `ffmpeg-x.y.z.tar.xz` 是**源代码**，需要自己用
+> `./configure && make` 编译（Windows 上还要装 MinGW/MSVC），解开后里面没有
+> 任何 `.exe`，程序无法直接使用。要的是**编译好的 Windows 二进制**，
+> 也就是上面 gyan.dev 或 <https://github.com/BtbN/FFmpeg-Builds/releases> 的发行包。
+
+ffmpeg 体积较大，已在 `.gitignore` 里排除（`ffmpeg.exe` / `ffmpeg-*/` 等都不入库）。
+可以在「下载管理」或启动提示里确认程序有没有找到它。
 
 ## 打包
 
@@ -160,4 +215,5 @@ quit                   退出
 注意：
 - 配置中的路径是**绝对路径**，换目录或换机器后需要重新选择文件
 - `app_gui.py` 用 `sys.path.insert` 自行解决模块导入，打包时把整个目录加进去即可
+- 打包后 `ffmpeg.exe` 放在 **exe 同级目录**即可被自动找到（`_app_dir()` 会返回 exe 所在目录）
 - 打包前请确认已安装 `pyinstaller` 与 `auto-py-to-exe`（二者不是运行依赖）
