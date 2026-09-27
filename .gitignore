@@ -12,6 +12,16 @@ dist/
 # ---------------- 本地登录凭证（含真实 Cookie，切勿提交）----------------
 config.json
 
+# ---------------- 本地播放列表数据 ----------------
+playlists.json
+playlists.json.broken
+playlists.json.tmp
+
+# ---------------- 开发期截图 / 临时脚本 ----------------
+shots/
+_seed_shot.py
+_probe*.py
+
 # ---------------- 虚拟环境 ----------------
 .venv/
 venv/

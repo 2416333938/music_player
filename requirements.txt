@@ -21,3 +21,6 @@ Pillow
 # ---- 以下两条版本区间是接口兼容性约束，请勿随意放开 ----
 qqmusic-api-python>=0.7.3,<0.8
 bilibili-api-python>=17,<18
+
+# ---- 可选：下载完成后写入 ID3 标签（缺失时下载功能不受影响）----
+mutagen

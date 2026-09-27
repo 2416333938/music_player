@@ -32,6 +32,8 @@ class QishuiClient:
                     "name": track.get("name"),
                     "artists": "/".join(a.get("name", "") for a in track.get("artists", [])),
                     "album": track.get("album", {}).get("name", ""),
+                    # 汽水返回的是毫秒
+                    "duration": int((track.get("duration") or 0) / 1000),
                 })
             return songs
         except Exception as e:

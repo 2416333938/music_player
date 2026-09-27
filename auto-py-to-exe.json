@@ -7,7 +7,7 @@
   },
   {
    "optionDest": "filenames",
-   "value": "D:/c++/py/music_player/main_gui.py"
+   "value": "D:/music_player/main_gui.py"
   },
   {
    "optionDest": "onefile",
@@ -51,27 +51,59 @@
   },
   {
    "optionDest": "datas",
-   "value": "D:/c++/py/music_player/config.py;."
+   "value": "D:/music_player/app_gui.py;."
   },
   {
    "optionDest": "datas",
-   "value": "D:/c++/py/music_player/login_dialog.py;."
+   "value": "D:/music_player/theme.py;."
   },
   {
    "optionDest": "datas",
-   "value": "D:/c++/py/music_player/main.py;."
+   "value": "D:/music_player/icons.py;."
   },
   {
    "optionDest": "datas",
-   "value": "D:/c++/py/music_player/main_gui.py;."
+   "value": "D:/music_player/widgets.py;."
   },
   {
    "optionDest": "datas",
-   "value": "D:/c++/py/music_player/player.py;."
+   "value": "D:/music_player/tray.py;."
   },
   {
    "optionDest": "datas",
-   "value": "D:/c++/py/music_player/platforms;platforms/"
+   "value": "D:/music_player/play_queue.py;."
+  },
+  {
+   "optionDest": "datas",
+   "value": "D:/music_player/downloader.py;."
+  },
+  {
+   "optionDest": "datas",
+   "value": "D:/music_player/config.py;."
+  },
+  {
+   "optionDest": "datas",
+   "value": "D:/music_player/login_dialog.py;."
+  },
+  {
+   "optionDest": "datas",
+   "value": "D:/music_player/main.py;."
+  },
+  {
+   "optionDest": "datas",
+   "value": "D:/music_player/main_gui.py;."
+  },
+  {
+   "optionDest": "datas",
+   "value": "D:/music_player/player.py;."
+  },
+  {
+   "optionDest": "datas",
+   "value": "D:/music_player/config.example.json;."
+  },
+  {
+   "optionDest": "datas",
+   "value": "D:/music_player/platforms;platforms/"
   }
  ],
  "nonPyinstallerOptions": {

@@ -32,7 +32,7 @@ class KugouClient:
                     self.session.cookies.set(k, v)
 
     def search(self, keyword: str, limit: int = 10):
-        """搜索歌曲，返回 [{hash, name, artists, album}]"""
+        """搜索歌曲，返回 [{hash, name, artists, album, duration}]"""
         try:
             r = self.session.get(
                 SEARCH_API,
@@ -58,6 +58,7 @@ class KugouClient:
                 "artists": item.get("singername"),
                 "album": item.get("album_name", ""),
                 "album_id": item.get("album_id"),
+                "duration": int(item.get("duration") or 0),   # 秒
             })
         return songs
 

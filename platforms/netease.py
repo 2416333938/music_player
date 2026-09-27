@@ -32,7 +32,7 @@ class NeteaseClient:
         return True
 
     def search(self, keyword: str, limit: int = 10):
-        """搜索歌曲，返回 [{id, name, artists, album}]"""
+        """搜索歌曲，返回 [{id, name, artists, album, duration}]"""
         result = apis.cloudsearch.GetSearchResult(keyword, stype=1, limit=limit)
         songs = []
         for item in result["result"]["songs"]:
@@ -41,6 +41,8 @@ class NeteaseClient:
                 "name": item["name"],
                 "artists": "/".join(a["name"] for a in item["ar"]),
                 "album": item["al"]["name"],
+                # 网易云返回的是毫秒，统一成秒
+                "duration": int((item.get("dt") or 0) / 1000),
             })
         return songs
 

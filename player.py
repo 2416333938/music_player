@@ -1,175 +1,612 @@
-"""统一音频播放器：支持 mp3/flac/m4a 等格式"""
+"""统一音频播放器
+
+在原来的「下载 → 本地解码播放」基础上增强：
+- 支持直接播放本地文件（下载过的曲目秒开）
+- 支持暂停 / 继续 / 跳转进度（seek）
+- 播放结束回调 on_finished（供播放列表自动续播）
+- 下载缓存：同一个 URL 只下一次，重复播放不再等待
+- pygame 解不了的格式自动用 ffmpeg 转码兜底
+
+对外接口尽量保持向后兼容：play_url(url, on_state_change=...) 仍可用。
+"""
+from __future__ import annotations
+
+import hashlib
 import os
 import shutil
 import subprocess
 import tempfile
 import threading
+import time
 
 import pygame
 import requests
 
+CACHE_DIR = os.path.join(
+    os.environ.get("TEMP") or tempfile.gettempdir(), "music_player_cache")
 
+CACHE_LIMIT_BYTES = 900 * 1024 * 1024      # 缓存上限 900MB
+CACHE_KEEP_NEWEST = 120                    # 至少保留最近 120 个文件
+
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+      "AppleWebKit/537.36 (KHTML, like Gecko) "
+      "Chrome/120.0.0.0 Safari/537.36")
+
+AUDIO_EXTS = (".mp3", ".flac", ".m4a", ".wav", ".ogg", ".aac", ".opus")
+
+
+# ============================================================
+# 工具
+# ============================================================
+def http_session() -> requests.Session:
+    session = requests.Session()
+    session.headers.update({"User-Agent": UA})
+    return session
+
+
+def _suffix_from_response(url: str, content_type: str) -> str:
+    ct = (content_type or "").lower()
+    if "m4a" in ct or "mp4" in ct:
+        return ".m4a"
+    if "flac" in ct:
+        return ".flac"
+    if "wav" in ct:
+        return ".wav"
+    if "ogg" in ct or "opus" in ct:
+        return ".ogg"
+    if "aac" in ct:
+        return ".aac"
+    path = (url or "").split("?")[0]
+    ext = os.path.splitext(path)[1].lower()
+    return ext if ext in AUDIO_EXTS else ".mp3"
+
+
+def cache_path_for(url: str, suffix: str = "") -> str:
+    key = hashlib.sha1((url or "").encode("utf-8")).hexdigest()[:20]
+    return os.path.join(CACHE_DIR, key + (suffix or ".bin"))
+
+
+def find_cached(url: str):
+    """查找该 URL 已缓存的文件"""
+    try:
+        key = hashlib.sha1((url or "").encode("utf-8")).hexdigest()[:20]
+        if not os.path.isdir(CACHE_DIR):
+            return None
+        for name in os.listdir(CACHE_DIR):
+            if name.startswith(key + ".") and not name.endswith(".part"):
+                path = os.path.join(CACHE_DIR, name)
+                if os.path.getsize(path) > 1024:
+                    return path
+    except Exception:
+        pass
+    return None
+
+
+def prune_cache():
+    """按体积 / 数量清理缓存目录"""
+    try:
+        if not os.path.isdir(CACHE_DIR):
+            return
+        files = []
+        total = 0
+        for name in os.listdir(CACHE_DIR):
+            path = os.path.join(CACHE_DIR, name)
+            try:
+                stat = os.stat(path)
+            except Exception:
+                continue
+            files.append((stat.st_mtime, stat.st_size, path))
+            total += stat.st_size
+
+        files.sort(reverse=True)          # 新的在前
+        for index, (mtime, size, path) in enumerate(files):
+            if index < CACHE_KEEP_NEWEST and total <= CACHE_LIMIT_BYTES:
+                continue
+            if index < 12:                # 最近 12 个无论如何留着
+                continue
+            try:
+                os.unlink(path)
+                total -= size
+            except Exception:
+                pass
+            if total <= CACHE_LIMIT_BYTES and index >= CACHE_KEEP_NEWEST:
+                break
+    except Exception:
+        pass
+
+
+def convert_to_mp3(src: str, workdir: str = None):
+    """用 ffmpeg 转 mp3，失败返回 None"""
+    if not shutil.which("ffmpeg"):
+        return None
+    workdir = workdir or os.path.dirname(src) or tempfile.gettempdir()
+    base = os.path.splitext(os.path.basename(src))[0]
+    dst = os.path.join(workdir, base + ".conv.mp3")
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", src, "-vn",
+             "-acodec", "libmp3lame", "-q:a", "2", dst],
+            check=True, timeout=300,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return dst if os.path.exists(dst) and os.path.getsize(dst) > 1024 else None
+    except Exception:
+        return None
+
+
+# ============================================================
+# 播放器
+# ============================================================
 class MusicPlayer:
+    """基于 pygame.mixer 的播放器，内部单工作线程串行处理命令"""
+
     def __init__(self):
         self._mixer_ok = True
+        self._mixer_error = ""
         try:
             pygame.mixer.init()
-        except Exception as e:
-            # 无音频设备时不让程序崩溃，播放时再提示
+        except Exception as exc:          # 没有声卡也不崩溃
             self._mixer_ok = False
-            print(f"[播放器] 音频设备初始化失败: {e}")
-        self._playing = False
-        self._temp_files = []          # 所有生成的临时文件
-        self._lock = threading.Lock()
+            self._mixer_error = str(exc)
+            print(f"[播放器] 音频设备初始化失败: {exc}")
 
-    # ---------------- 对外接口 ----------------
-    def play_url(self, url: str, on_state_change=None):
-        """异步下载并播放指定的音频 URL"""
-        self.stop()
-        threading.Thread(
-            target=self._download_and_play,
-            args=(url, on_state_change),
-            daemon=True,
-        ).start()
+        self._volume = 0.7
+        self._lock = threading.Lock()
+        self._cmd_lock = threading.Lock()
+        self._wake = threading.Event()    # 有新命令时唤醒工作线程
+        self._pending = None              # 最新一条待执行命令
+        self._generation = 0              # 每次切歌 +1，用于作废旧回调
+        self._playing = False
+        self._paused = False
+        self._finished_emitted = False
+        self._loading = False
+        self._current = None              # {"url"/"path", "title", "gen"}
+        self._position = 0.0              # 秒
+        self._duration = 0.0              # 秒
+        self._started_at = 0.0
+        self._offset = 0.0
+        self._local_files = []            # 由本播放器创建的临时文件
+
+        self.on_state = None              # 回调: (state:str) -> None
+        self.on_finished = None           # 回调: () -> None
+
+        try:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+        except Exception:
+            pass
+
+        self._worker = threading.Thread(target=self._loop, daemon=True,
+                                        name="music-player")
+        # 先启动工作线程，再把缓存清理放到后台
+        self._worker.start()
+
+        threading.Thread(target=prune_cache, daemon=True).start()
+
+    # ==================================================
+    # 对外接口
+    # ==================================================
+    @property
+    def mixer_ok(self) -> bool:
+        return self._mixer_ok
+
+    @property
+    def mixer_error(self) -> str:
+        return self._mixer_error
+
+    def set_volume(self, value: float):
+        """value: 0.0 ~ 1.0"""
+        self._volume = max(0.0, min(1.0, float(value or 0)))
+        try:
+            pygame.mixer.music.set_volume(self._volume)
+        except Exception:
+            pass
+
+    def get_volume(self) -> float:
+        return self._volume
+
+    def play(self, source: str, title: str = "", on_state_change=None,
+             on_finished=None, is_url=None):
+        """播放一首曲目
+
+        source  ：音频 URL 或本地文件路径
+        is_url  ：None 表示自动判断（含 "://" 视为 URL）
+        """
+        if on_state_change is not None:
+            self.on_state = on_state_change
+        if on_finished is not None:
+            self.on_finished = on_finished
+
+        if is_url is None:
+            is_url = "://" in (source or "")
+        self._submit({"action": "play", "source": source,
+                      "title": title or "", "is_url": bool(is_url)})
+
+    def play_url(self, url: str, on_state_change=None, on_finished=None):
+        """向后兼容的旧接口"""
+        self.play(url, on_state_change=on_state_change,
+                  on_finished=on_finished, is_url=True)
+
+    def play_file(self, path: str, on_state_change=None, on_finished=None):
+        self.play(path, on_state_change=on_state_change,
+                  on_finished=on_finished, is_url=False)
 
     def pause(self):
+        if not self._playing or self._paused:
+            return
         try:
             pygame.mixer.music.pause()
+            self._paused = True
+            self._emit("paused")
         except Exception:
             pass
 
     def resume(self):
+        if not self._playing or not self._paused:
+            return
         try:
             pygame.mixer.music.unpause()
+            self._paused = False
+            self._emit("playing")
         except Exception:
             pass
 
-    def stop(self):
+    def toggle_pause(self):
+        if self._paused:
+            self.resume()
+        else:
+            self.pause()
+        return self._paused
+
+    def stop(self, keep_source=False):
+        """停止播放并释放资源（不动列表里的下一首）"""
+        self._submit({"action": "stop"})
+        if not keep_source:
+            self._current = None
+
+    def seek(self, seconds: float):
+        seconds = max(0.0, float(seconds or 0))
+        self._submit({"action": "seek", "seconds": seconds})
+
+    def seek_ratio(self, ratio: float):
         with self._lock:
+            duration = self._duration
+        if duration > 0:
+            self.seek(duration * max(0.0, min(1.0, float(ratio or 0))))
+
+    def shutdown(self):
+        """退出程序时调用：停播 + 清理临时文件"""
+        try:
+            self._submit({"action": "quit"})
+        except Exception:
+            pass
+        time.sleep(0.15)
+        try:
+            pygame.mixer.music.stop()
+            pygame.mixer.quit()
+        except Exception:
+            pass
+        self._cleanup_local()
+
+    # ---------------- 状态查询 ----------------
+    def get_state(self) -> dict:
+        """返回播放状态快照"""
+        with self._lock:
+            playing = self._playing
+            paused = self._paused
+            position = self._position
+            duration = self._duration
+            loading = self._loading
+            current = dict(self._current) if self._current else None
+
+        if playing and not paused:
+            try:
+                if pygame.mixer.music.get_busy():
+                    position = min(
+                        duration if duration > 0 else 10 ** 9,
+                        self._offset + max(0.0, pygame.mixer.music.get_pos() / 1000.0),
+                    )
+            except Exception:
+                pass
+
+        return {
+            "playing": playing,
+            "paused": paused,
+            "loading": loading,
+            "position": max(0.0, position),
+            "duration": max(0.0, duration),
+            "current": current,
+        }
+
+    def is_playing(self) -> bool:
+        with self._lock:
+            return self._playing and not self._paused
+
+    # ==================================================
+    # 工作线程
+    # ==================================================
+    def _submit(self, cmd: dict):
+        """提交命令：只保留最新一条，天然实现「快速切歌不排队」
+
+        注意：这里不能顺手把播放状态清掉——seek / pause 期间状态必须保持，
+        否则界面会以为已经停止播放。
+        """
+        with self._cmd_lock:
+            self._pending = cmd
+        self._wake.set()
+
+    def _loop(self):
+        while True:
+            self._wake.wait(timeout=0.12)
+            self._wake.clear()
+
+            with self._cmd_lock:
+                cmd = self._pending
+                self._pending = None
+            if cmd is None:
+                self._tick()
+                continue
+
+            action = cmd.get("action")
+            try:
+                if action == "play":
+                    self._do_play(cmd)
+                elif action == "stop":
+                    self._do_stop()
+                elif action == "seek":
+                    self._do_seek(cmd.get("seconds", 0.0))
+                elif action == "quit":
+                    self._do_stop()
+                    return
+            except Exception as exc:
+                print(f"[播放器] 命令 {action} 出错: {exc}")
+
+    def _tick(self):
+        """播放中定期检查是否播完，播完则触发一次 on_finished"""
+        with self._lock:
+            playing = self._playing
+            paused = self._paused
+            done = self._finished_emitted
+        if not playing or paused or done:
+            return
+        try:
+            busy = pygame.mixer.music.get_busy()
+        except Exception:
+            return
+        if busy:
+            return
+
+        with self._lock:
+            if self._finished_emitted:
+                return
+            self._finished_emitted = True
             self._playing = False
+            self._paused = False
+        self._emit("finished")
+        callback = self.on_finished
+        if callback:
+            try:
+                callback()
+            except Exception as exc:
+                print("[播放器] on_finished 回调异常:", exc)
+
+    # ---------------- 具体动作 ----------------
+    def _do_stop(self):
+        with self._lock:
+            self._generation += 1
+            self._playing = False
+            self._paused = False
+            self._loading = False
+            self._position = 0.0
+            self._duration = 0.0
+            self._offset = 0.0
         try:
             pygame.mixer.music.stop()
             pygame.mixer.music.unload()
         except Exception:
             pass
-        self._cleanup()
+        self._cleanup_local()
 
-    def set_volume(self, value: float):
-        """value: 0.0 ~ 1.0"""
+    def _do_seek(self, seconds: float):
+        with self._lock:
+            was_playing = self._playing
+            paused = self._paused
+            duration = self._duration
+        if not was_playing:
+            return
+        if duration > 0:
+            seconds = min(seconds, max(0.0, duration - 0.35))
         try:
-            pygame.mixer.music.set_volume(max(0.0, min(1.0, value)))
+            pygame.mixer.music.play(start=max(0.0, seconds))
+            if paused:
+                pygame.mixer.music.pause()
+            with self._lock:
+                self._offset = max(0.0, seconds)
+                self._position = max(0.0, seconds)
+                self._finished_emitted = False
+        except Exception as exc:
+            print(f"[播放器] 跳转失败: {exc}")
+
+    def _do_play(self, cmd):
+        source = cmd.get("source") or ""
+        title = cmd.get("title") or ""
+        is_url = cmd.get("is_url")
+
+        with self._lock:
+            previous = self._current
+            same_source = bool(
+                previous and previous.get("source") == source
+                and self._playing and not self._finished_emitted)
+            self._generation += 1
+            generation = self._generation
+            if not same_source:
+                # 换歌才清空播放态；同一首重播保持 UI 连贯
+                self._playing = False
+                self._paused = False
+                self._position = 0.0
+                self._duration = 0.0
+                self._offset = 0.0
+            self._loading = not same_source
+            self._finished_emitted = False
+            self._current = {"source": source, "title": title,
+                             "gen": generation}
+
+        # 停掉上一首
+        try:
+            pygame.mixer.music.stop()
+            pygame.mixer.music.unload()
         except Exception:
             pass
+        self._cleanup_local()
 
-    # ---------------- 内部实现 ----------------
-    def _download_and_play(self, url, on_state_change):
-        try:
-            if not self._mixer_ok:
-                raise RuntimeError("音频设备不可用，无法播放")
-            if on_state_change:
-                on_state_change("downloading")
+        if not self._mixer_ok:
+            self._fail(generation, f"音频设备不可用（{self._mixer_error}）")
+            return
 
-            filepath = self._download(url)
-            if not filepath:
-                raise RuntimeError("下载失败")
+        self._emit_if_current(generation, "downloading")
 
-            # 尝试直接加载
-            try:
-                pygame.mixer.music.load(filepath)
-            except Exception:
-                # 加载失败 → 用 ffmpeg 转成 mp3
-                converted = self._convert_to_mp3(filepath)
-                if not converted:
-                    raise RuntimeError(
-                        "无法播放该格式，请安装 ffmpeg：https://ffmpeg.org"
-                    )
-                filepath = converted
-                pygame.mixer.music.load(filepath)
-
-            pygame.mixer.music.play()
-            with self._lock:
-                self._playing = True
-
-            if on_state_change:
-                on_state_change("playing")
-
-            while True:
-                with self._lock:
-                    if not self._playing:
-                        break
-                if not pygame.mixer.music.get_busy():
-                    break
-                pygame.time.wait(300)
-
-            if on_state_change:
-                on_state_change("finished")
-
-        except Exception as e:
-            if on_state_change:
-                on_state_change(f"error:{e}")
-
-    def _download(self, url: str) -> str:
-        """把 URL 内容下载到临时文件，返回路径"""
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            )
-        }
-        r = requests.get(url, stream=True, timeout=30, headers=headers)
-        r.raise_for_status()
-
-        ct = (r.headers.get("Content-Type") or "").lower()
-        if "m4a" in ct or "mp4" in ct:
-            suffix = ".m4a"
-        elif "flac" in ct:
-            suffix = ".flac"
-        elif "wav" in ct:
-            suffix = ".wav"
-        elif "ogg" in ct:
-            suffix = ".ogg"
+        # ---- 1. 准备本地文件 ----
+        if is_url:
+            path = find_cached(source)
+            if path is None:
+                try:
+                    path = self._download(source, generation)
+                except Exception as exc:
+                    self._fail(generation, f"下载失败: {exc}")
+                    return
+                if path is None:          # 被新命令打断
+                    return
         else:
-            # 从 URL 里尝试推断
-            path = url.split("?")[0]
-            ext = os.path.splitext(path)[1].lower()
-            suffix = ext if ext in (".mp3", ".flac", ".m4a", ".wav", ".ogg") else ".mp3"
+            path = source
+            if not path or not os.path.exists(path):
+                self._fail(generation, "文件不存在")
+                return
 
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-        for chunk in r.iter_content(16384):
-            tmp.write(chunk)
-        tmp.close()
-
-        self._temp_files.append(tmp.name)
-        return tmp.name
-
-    def _convert_to_mp3(self, src: str):
-        """用 ffmpeg 转换成 mp3，失败返回 None"""
-        if not shutil.which("ffmpeg"):
-            return None
-        dst = src + ".converted.mp3"
+        # ---- 2. 加载（失败则尝试 ffmpeg 转码）----
         try:
-            subprocess.run(
-                [
-                    "ffmpeg", "-y", "-loglevel", "error",
-                    "-i", src, "-vn",
-                    "-acodec", "libmp3lame", "-q:a", "2",
-                    dst,
-                ],
-                check=True,
-                timeout=180,
-            )
-            self._temp_files.append(dst)
-            return dst
+            pygame.mixer.music.load(path)
         except Exception:
-            return None
-
-    def _cleanup(self):
-        """清理所有临时文件"""
-        for f in list(self._temp_files):
+            converted = convert_to_mp3(
+                path,
+                workdir=CACHE_DIR if is_url else os.path.dirname(path) or None)
+            if not converted:
+                self._fail(generation, "无法播放该格式，请安装 ffmpeg："
+                                       "https://ffmpeg.org")
+                return
+            if not is_url:
+                self._local_files.append(converted)
             try:
-                if os.path.exists(f):
-                    os.unlink(f)
+                pygame.mixer.music.load(converted)
+                path = converted
+            except Exception as exc:
+                if converted not in self._local_files:
+                    try:
+                        os.unlink(converted)
+                    except Exception:
+                        pass
+                self._fail(generation, f"加载失败: {exc}")
+                return
+
+        # ---- 3. 播放 ----
+        try:
+            pygame.mixer.music.set_volume(self._volume)
+            pygame.mixer.music.play()
+        except Exception as exc:
+            self._fail(generation, f"播放失败: {exc}")
+            return
+
+        duration = self._probe_duration(path)
+        with self._lock:
+            if generation != self._generation:
+                try:
+                    pygame.mixer.music.stop()
+                except Exception:
+                    pass
+                return
+            self._playing = True
+            self._paused = False
+            self._loading = False
+            self._duration = duration
+            self._started_at = time.time()
+        self._emit_if_current(generation, "playing")
+
+    def _probe_duration(self, path: str) -> float:
+        try:
+            sound = pygame.mixer.Sound(path)
+            value = float(sound.get_length())
+            if value > 0:
+                return value
+        except Exception:
+            pass
+        return 0.0
+
+    def _download(self, url: str, generation: int):
+        """流式下载到缓存目录，返回路径；中途被打断返回 None"""
+        session = http_session()
+        response = session.get(url, stream=True, timeout=30)
+        response.raise_for_status()
+
+        suffix = _suffix_from_response(url, response.headers.get("Content-Type"))
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        key = hashlib.sha1(url.encode("utf-8")).hexdigest()[:20]
+        final_path = os.path.join(CACHE_DIR, key + suffix)
+        tmp_path = final_path + ".part"
+
+        total = int(response.headers.get("Content-Length") or 0)
+        done = 0
+        last_percent = -1
+        with open(tmp_path, "wb") as fh:
+            for chunk in response.iter_content(65536):
+                if not chunk:
+                    continue
+                if generation != self._generation:
+                    fh.close()
+                    try:
+                        os.unlink(tmp_path)
+                    except Exception:
+                        pass
+                    return None
+                fh.write(chunk)
+                done += len(chunk)
+                if total:
+                    percent = int(done * 100 / total)
+                    # 每变化 2% 才回报一次，避免刷屏
+                    if percent >= last_percent + 2:
+                        last_percent = percent
+                        self._emit_if_current(generation,
+                                              f"downloading:{percent}")
+
+        os.replace(tmp_path, final_path)
+        return final_path
+
+    def _emit_if_current(self, generation: int, state: str):
+        with self._lock:
+            if generation != self._generation:
+                return
+        self._emit(state)
+
+    def _fail(self, generation: int, message: str):
+        with self._lock:
+            if generation != self._generation:
+                return
+            self._playing = False
+            self._paused = False
+            self._loading = False
+        self._emit(f"error:{message}")
+
+    def _emit(self, state: str):
+        callback = self.on_state
+        if not callback:
+            return
+        try:
+            callback(state)
+        except Exception as exc:
+            print("[播放器] 状态回调异常:", exc)
+
+    def _cleanup_local(self):
+        for path in list(self._local_files):
+            try:
+                if os.path.exists(path):
+                    os.unlink(path)
             except Exception:
                 pass
-        self._temp_files.clear()
+        self._local_files.clear()

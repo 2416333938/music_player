@@ -56,7 +56,7 @@ if errorlevel 1 (
 
 echo.
 echo [3/3] 正在安装依赖库（约 1-3 分钟，请耐心等待）...
-%PYEXE% -m pip install pygame requests pyncm "qqmusic-api-python>=0.7.3,<0.8" "bilibili-api-python>=17,<18" qrcode Pillow
+%PYEXE% -m pip install pygame requests pyncm "qqmusic-api-python>=0.7.3,<0.8" "bilibili-api-python>=17,<18" qrcode Pillow mutagen
 if errorlevel 1 (
     echo.
     echo [错误] 依赖安装失败。请检查网络后重新运行本脚本。
@@ -67,11 +67,20 @@ if errorlevel 1 (
 rem ---------- 3. 验证安装结果 ----------
 echo.
 echo 正在验证依赖是否可用 ...
-%PYEXE% -c "import pygame, requests, pyncm, qqmusic_api, bilibili_api, qrcode, PIL; print('全部依赖导入成功 ✔')" >nul 2>nul
+%PYEXE% -c "import pygame, requests, pyncm, qqmusic_api, bilibili_api, qrcode, PIL; print('全部依赖导入成功')" >nul 2>nul
 if errorlevel 1 (
     echo [警告] 依赖导入验证未通过，请重试或手动排查。
 ) else (
-    echo 全部依赖导入成功 ✔
+    echo 全部依赖导入成功
+)
+
+echo.
+echo 正在验证界面模块 ...
+%PYEXE% -c "import theme, icons, widgets, tray, play_queue, downloader, app_gui; print('界面模块导入成功')" >nul 2>nul
+if errorlevel 1 (
+    echo [警告] 界面模块导入失败，运行「启动播放器.bat」查看具体报错。
+) else (
+    echo 界面模块导入成功
 )
 
 echo.

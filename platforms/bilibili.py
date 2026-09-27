@@ -3,6 +3,30 @@ import asyncio
 from bilibili_api import video, search, Credential
 
 
+def _parse_duration(item: dict) -> int:
+    """搜索结果里的时长可能是 '12:34' / '1:02:03' / 秒数，统一成秒"""
+    raw = item.get("duration")
+    if isinstance(raw, (int, float)):
+        return int(raw)
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw:
+            return 0
+        if ":" in raw:
+            total = 0
+            try:
+                for part in raw.split(":"):
+                    total = total * 60 + int(part.strip())
+            except ValueError:
+                return 0
+            return total
+        try:
+            return int(raw)
+        except ValueError:
+            return 0
+    return 0
+
+
 class BilibiliClient:
     def __init__(self, sessdata=None, bili_jct=None):
         if sessdata:
@@ -11,7 +35,10 @@ class BilibiliClient:
             self.credential = None
 
     async def search_videos(self, keyword: str, limit: int = 10):
-        """搜索视频，返回 BV 号列表"""
+        """搜索视频，返回 BV 号列表
+
+        title 里带 B 站的 <em> 高亮标记，交给上层 tray.make_track 统一清理。
+        """
         results = await search.search_by_type(
             keyword, search_type=search.SearchObjectType.VIDEO,
             page=1, page_size=limit
@@ -22,6 +49,7 @@ class BilibiliClient:
                 "bvid": item.get("bvid"),
                 "title": item.get("title"),
                 "author": item.get("author"),
+                "duration": _parse_duration(item),
             })
         return videos
 

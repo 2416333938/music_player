@@ -17,5 +17,10 @@
   "bilibili": {
     "sessdata": "",
     "bili_jct": ""
+  },
+  "app": {
+    "download_dir": "",
+    "play_mode": "sequential",
+    "volume": 0.7
   }
 }
