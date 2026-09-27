@@ -55,6 +55,30 @@
   },
   {
    "optionDest": "datas",
+   "value": "D:/music_player/accounts.py;."
+  },
+  {
+   "optionDest": "datas",
+   "value": "D:/music_player/cards.py;."
+  },
+  {
+   "optionDest": "datas",
+   "value": "D:/music_player/cover.py;."
+  },
+  {
+   "optionDest": "datas",
+   "value": "D:/music_player/feed.py;."
+  },
+  {
+   "optionDest": "datas",
+   "value": "D:/music_player/updater.py;."
+  },
+  {
+   "optionDest": "datas",
+   "value": "D:/music_player/settings_dialog.py;."
+  },
+  {
+   "optionDest": "datas",
    "value": "D:/music_player/theme.py;."
   },
   {

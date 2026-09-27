@@ -56,13 +56,13 @@ class CoverArt(tk.Canvas):
 
         # 左上角播放量角标
         if self._badge:
-            bar_h = 21
-            width = self._badge_width() + 30
-            icons.rounded_rect(self, 6, 6, 6 + width, 6 + bar_h, bar_h / 2,
+            bar_h = 22
+            width = self._badge_width() + 34
+            icons.rounded_rect(self, 8, 8, 8 + width, 8 + bar_h, bar_h / 2,
                                fill=T.mix(self._bg, "#000000", 0.55),
                                outline="")
-            icons.draw_icon(self, "play", 17, 6 + bar_h / 2, 9, "#ffffff")
-            self.create_text(26, 6 + bar_h / 2, text=self._badge,
+            icons.draw_icon(self, "play", 20, 8 + bar_h / 2, 10, "#ffffff")
+            self.create_text(31, 8 + bar_h / 2, text=self._badge,
                              fill="#ffffff", font=T.Fonts(self).tiny,
                              anchor="w")
 

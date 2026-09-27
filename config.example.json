@@ -21,6 +21,10 @@
   "app": {
     "download_dir": "",
     "play_mode": "sequential",
-    "volume": 0.7
+    "volume": 0.7,
+    "auto_update": true,
+    "update_interval_hours": 24,
+    "update_source": "",
+    "last_update_check": 0
   }
 }

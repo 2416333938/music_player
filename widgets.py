@@ -853,6 +853,80 @@ class Toast(tk.Frame):
 
 
 # ============================================================
+# 开关（画成 iOS 那种滑块）
+# ============================================================
+class Switch(tk.Canvas):
+    """自绘开关，用于设置页的「开 / 关」"""
+
+    def __init__(self, master, value=True, on_change=None, bg=None,
+                 width=46, height=24, tooltip=None):
+        self._bg = bg or T.PANEL
+        super().__init__(master, width=width, height=height, bg=self._bg,
+                         highlightthickness=0, bd=0, takefocus=0)
+        # 注意：不能叫 self._w / self._h —— 那是 tkinter 存控件路径的属性
+        self._sw, self._sh = width, height
+        self._on = bool(value)
+        self._on_change = on_change
+        self._hover = False
+        self._enabled = True
+        self.bind("<Button-1>", self._toggle)
+        self.bind("<Enter>", self._enter)
+        self.bind("<Leave>", self._leave)
+        self._redraw()
+        if tooltip:
+            Tooltip(self, tooltip)
+
+    def _redraw(self):
+        self.delete("all")
+        w, h = self._sw, self._sh
+        r = h / 2
+        track = T.ACCENT if self._on else T.ELEVATED
+        if not self._enabled:
+            track = T.PANEL_ALT
+        elif self._hover:
+            track = T.ACCENT_HOVER if self._on else T.HOVER
+        icons.rounded_rect(self, 1, 1, w - 1, h - 1, r, fill=track,
+                           outline=track)
+        knob_r = r - 3
+        cx = (w - r) if self._on else r
+        icons.circle(self, cx, h / 2, knob_r,
+                     fill="#ffffff" if self._enabled else T.TEXT_3,
+                     outline="")
+
+    def _toggle(self, _e=None):
+        if not self._enabled:
+            return
+        self._on = not self._on
+        self._redraw()
+        if self._on_change:
+            try:
+                self._on_change(self._on)
+            except Exception as exc:
+                print("[开关] 回调异常:", exc)
+
+    def _enter(self, _e=None):
+        self._hover = True
+        self._redraw()
+
+    def _leave(self, _e=None):
+        self._hover = False
+        self._redraw()
+
+    def get(self) -> bool:
+        return self._on
+
+    def set(self, value, notify=False):
+        self._on = bool(value)
+        self._redraw()
+        if notify and self._on_change:
+            self._on_change(self._on)
+
+    def set_enabled(self, enabled: bool):
+        self._enabled = bool(enabled)
+        self._redraw()
+
+
+# ============================================================
 # 悬浮提示
 # ============================================================
 class Tooltip:

@@ -85,12 +85,22 @@ def _run_checks():
     import play_queue
     import downloader
     import player
+    import accounts
+    import cover
+    import cards
+    import feed
+    import updater
     import app_gui
+
+    FEED = feed
+    CARD_MODULE = cards
 
     for name, module in [("theme", T), ("icons", icons), ("widgets", W),
                          ("tray", tray), ("play_queue", play_queue),
                          ("downloader", downloader), ("player", player),
-                         ("app_gui", app_gui)]:
+                         ("accounts", accounts), ("cover", cover),
+                         ("cards", cards), ("feed", feed),
+                         ("updater", updater), ("app_gui", app_gui)]:
         check(module is not None, f"import {name}")
 
     print("\n=== 2. 纯逻辑：曲目模型 / 歌单存储 ===")
@@ -336,7 +346,92 @@ def _run_checks():
     check(set(counts.keys()) == set(app_gui.T.PLATFORM_KEYS),
           "counts() 覆盖 5 个平台")
 
-    print("\n=== 6. 界面构建 ===")
+    print("\n=== 6. 自动更新逻辑（不联网，只测解析与策略） ===")
+    import updater as U
+
+    check(U.parse_version("v2.1.0") == (2, 1, 0), "版本号解析 v2.1.0")
+    check(U.parse_version("2.0") == (2, 0, 0), "版本号补零 2.0 → 2.0.0")
+    check(U.parse_version("") == (0, 0, 0), "空版本号容错")
+    check(U.parse_version("1.10.3") > U.parse_version("1.9.9"),
+          "版本号比较 1.10.3 > 1.9.9（不是字符串比较）")
+    check(U.is_newer("2.1.0", "2.0.0"), "检测到新版本")
+    check(not U.is_newer("2.0.0", "2.0.0"), "同版本不算更新")
+    check(not U.is_newer("1.9.0", "2.0.0"), "旧版本不算更新")
+
+    # 两种更新源格式
+    gh = U._normalize_manifest({
+        "tag_name": "v3.0.0", "body": "更新说明",
+        "html_url": "https://example.com/rel",
+        "assets": [{"name": "app.zip",
+                    "browser_download_url": "https://example.com/app.zip"}]})
+    check(gh["version"] == "v3.0.0" and gh["url"].endswith("app.zip"),
+          "GitHub Releases 格式解析")
+    plain = U._normalize_manifest({"version": "2.5", "notes": "说明",
+                                   "url": "https://example.com/a.zip"})
+    check(plain["version"] == "2.5" and plain["notes"] == "说明",
+          "自定义 JSON 清单解析")
+
+    # 关闭 / 没源 / 检查间隔
+    info = U.check_for_update("2.0.0", "https://example.com/x", enabled=False)
+    check(info.status == U.STATUS_DISABLED, "关掉开关就不再检查")
+    check(not info.has_update, "关闭状态没有更新")
+    info2 = U.check_for_update("2.0.0", "", enabled=True)
+    check(info2.status == U.STATUS_NO_SOURCE, "没填更新源时的状态")
+    info3 = U.check_for_update("2.0.0", "https://127.0.0.1:9/nope",
+                               enabled=True, timeout=2)
+    check(info3.status == U.STATUS_ERROR and info3.error,
+          f"取不到清单时优雅报错（{info3.error[:40]}）")
+
+    app_cfg = {"auto_update": True, "update_interval_hours": 24,
+               "last_update_check": 0}
+    check(U.should_check(app_cfg), "从没检查过 → 应该检查")
+    U.mark_checked(app_cfg)
+    check(not U.should_check(app_cfg), "刚检查过 → 不再重复检查")
+    check(U.should_check(app_cfg, force=True), "手动强制检查")
+    app_cfg["auto_update"] = False
+    check(not U.should_check(dict(app_cfg, last_update_check=0)),
+          "开关关闭时不自动检查")
+
+    print("\n=== 7. 封面与首页内容（本地生成，不联网） ===")
+    import cover as CV
+    check(CV.url_key("http://a/b.jpg") == CV.url_key("http://a/b.jpg"),
+          "同一地址的缓存 key 稳定")
+    check(CV.url_key("http://a/b.jpg") != CV.url_key("http://a/c.jpg"),
+          "不同地址 key 不同")
+    art1 = CV.make_art("周杰伦 - 晴天", 120)
+    art2 = CV.make_art("周杰伦 - 晴天", 120)
+    art3 = CV.make_art("陈奕迅 - 浮夸", 120)
+    check(art1 is not None and art1.size == (120, 120), "兜底封面可生成")
+    if art1 is not None and art2 is not None and art3 is not None:
+        check(list(art1.getdata()) == list(art2.getdata()),
+              "同一曲目的兜底封面完全一致（确定性）")
+        check(list(art1.getdata()) != list(art3.getdata()),
+              "不同曲目的兜底封面不一样")
+
+    library = [tray.make_track("netease",
+                               {"id": i, "name": f"歌{i}",
+                                "artists": "歌手", "album": "专辑",
+                                "duration": 180})
+               for i in range(40)]
+    daily1 = FEED.build_daily(library, [])
+    daily2 = FEED.build_daily(library, [])
+    check(len(daily1) == 30, f"每日推荐数量（{len(daily1)}）")
+    check([t["id"] for t in daily1] == [t["id"] for t in daily2],
+          "同一天内每日推荐结果固定")
+    check(len({t["id"] for t in daily1}) == len(daily1), "每日推荐不重复")
+    check(len(FEED.build_guess(library, daily1[:5], None)) == 30,
+          "猜你喜欢有结果")
+    check(FEED.build_daily([], []) == [], "音乐库为空时每日推荐为空")
+    check(FEED.build_recent(daily1[:5], 3) == daily1[:3], "最近播放截断正确")
+    check(FEED.station_cover(daily1) == "", "无封面时返回空串")
+    track_with_cover = dict(library[0], cover="http://x/y.jpg")
+    check(FEED.station_cover([track_with_cover]) == "http://x/y.jpg",
+          "有封面时能取到")
+    check(CARD_MODULE.make_badge_count(12345) == "1.2万",
+          "播放量格式化 12345 → 1.2万")
+    check(CARD_MODULE.make_badge_count(999) == "999", "播放量格式化 999")
+
+    print("\n=== 8. 界面构建 ===")
     app = None
     try:
         app = app_gui.PlayerApp(root)
@@ -347,16 +442,31 @@ def _run_checks():
         check(app.library_tree is not None, "全部音乐表存在")
         check(app.mode_btn is not None, "播放模式按钮存在")
         check(app.seekbar is not None, "进度条存在")
-        check(len(app.nav_buttons) == 4, "侧边栏导航 4 项（含账号管理）")
+        check(len(app.nav_buttons) == 6,
+              f"侧边栏导航 6 项（实际 {len(app.nav_buttons)}）")
         check(app.acct_inner is not None, "账号管理视图存在")
+        check(app.home_grid is not None, "首页「猜你喜欢」区域存在")
+        check(len(app.category_row.cards) == len(FEED.CATEGORY_CARDS),
+              "首页分类卡片已渲染")
+        check(app.search_entry is not None, "顶部搜索框存在")
+        check(app.back_btn is not None and app.forward_btn is not None,
+              "前进 / 后退按钮存在")
+        check(app.top_account_label is not None, "顶部账号区存在")
 
         # 各视图切换
         for view in (app_gui.VIEW_LIBRARY, app_gui.VIEW_PLAYLIST,
                      app_gui.VIEW_DOWNLOAD, app_gui.VIEW_ACCOUNTS,
-                     app_gui.VIEW_SEARCH):
+                     app_gui.VIEW_LOCAL, app_gui.VIEW_SEARCH,
+                     app_gui.VIEW_HOME):
             app._switch_view(view)
             root.update()
-        check(True, "五个视图切换无异常")
+        check(True, "七个视图切换无异常")
+        check(len(app._nav_stack) > 3, "浏览历史已记录")
+        app._nav_back()
+        root.update()
+        app._nav_forward()
+        root.update()
+        check(True, "前进 / 后退可用")
 
         # 填入搜索结果
         app._display_results({"netease": items, "bilibili": [bili]}, {},

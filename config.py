@@ -44,6 +44,11 @@ DEFAULT_CONFIG = {
         "download_dir": "",
         "play_mode": "sequential",
         "volume": 0.7,
+        # 自动更新：开关 / 检查间隔（小时）/ 更新源地址
+        "auto_update": True,
+        "update_interval_hours": 24,
+        "update_source": "",
+        "last_update_check": 0,
     },
 }
 

@@ -17,6 +17,9 @@ playlists.json
 playlists.json.broken
 playlists.json.tmp
 
+# ---------------- 首页推荐内容缓存 ----------------
+feed_cache.json
+
 # ---------------- 开发期截图 / 临时脚本 ----------------
 shots/
 _seed_shot.py
