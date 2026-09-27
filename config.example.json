@@ -1,0 +1,21 @@
+{
+  "netease": {
+    "cookie": "",
+    "phone": "",
+    "password": ""
+  },
+  "qqmusic": {
+    "cookie": "",
+    "phone": ""
+  },
+  "kugou": {
+    "cookie": ""
+  },
+  "qishui": {
+    "cookie": ""
+  },
+  "bilibili": {
+    "sessdata": "",
+    "bili_jct": ""
+  }
+}

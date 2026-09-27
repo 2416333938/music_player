@@ -1,0 +1,23 @@
+# 多平台音乐播放器 —— 运行依赖
+#
+# 安装方式（任选其一）：
+#   双击「安装依赖.bat」
+#   py -3.11 -m pip install -r requirements.txt
+#
+# 说明：tkinter 与 asyncio 属于 Python 标准库，无需在此声明。
+#       打包相关工具（pyinstaller / auto-py-to-exe）不是运行依赖，按需另装。
+
+# ---- 音频播放 ----
+pygame
+
+# ---- 网络请求（音频下载、酷狗 / 汽水直连接口）----
+requests
+
+# ---- 各平台接口客户端 ----
+pyncm
+qrcode
+Pillow
+
+# ---- 以下两条版本区间是接口兼容性约束，请勿随意放开 ----
+qqmusic-api-python>=0.7.3,<0.8
+bilibili-api-python>=17,<18
